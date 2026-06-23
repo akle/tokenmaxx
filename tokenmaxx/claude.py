@@ -34,11 +34,20 @@ def dry_run_output(command: list[str]) -> str:
     return "DRY RUN: " + " ".join(shlex.quote(part) for part in command)
 
 
-def run_due_item(item: QueueItem, now: int, args) -> QueueItem:
+def run_due_item(
+    item: QueueItem,
+    *,
+    now: int,
+    claude_bin: str,
+    dry_run: bool,
+    retry_delay_seconds: int,
+    followup_delay_seconds: int,
+    max_attempts: int,
+) -> QueueItem:
     if not is_due(item, now):
         return item
-    command = build_resume_command(item, args.claude_bin, DEFAULT_PROMPT)
-    if args.dry_run:
+    command = build_resume_command(item, claude_bin, DEFAULT_PROMPT)
+    if dry_run:
         item.last_output = dry_run_output(command)
         item.updated_at = now
         return item
@@ -56,7 +65,7 @@ def run_due_item(item: QueueItem, now: int, args) -> QueueItem:
         item,
         output,
         now=now,
-        retry_delay_seconds=args.retry_delay_seconds,
-        followup_delay_seconds=args.followup_delay_seconds,
-        max_attempts=args.max_attempts,
+        retry_delay_seconds=retry_delay_seconds,
+        followup_delay_seconds=followup_delay_seconds,
+        max_attempts=max_attempts,
     )

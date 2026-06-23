@@ -7,29 +7,25 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .claude import build_resume_command, load_claude_sessions, run_due_item
+from .claude import load_claude_sessions, run_due_item
 from .config import (
     DEFAULT_FOLLOWUP_DELAY_SECONDS,
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
-    DEFAULT_PROMPT,
     DEFAULT_RETRY_DELAY_SECONDS,
     default_log_path,
     default_plist_path,
     default_queue_path,
     default_sessions_dir,
 )
-from .launchd import build_launchd_plist as _build_launchd_plist
+from .launchd import build_launchd_plist
 from .queue import (
     QueueItem,
     append_queue_item,
-    classify_output,
     is_due,
     load_queue,
     one_line,
     queue_lock,
-    queue_lock_path,
-    update_item_after_output as _update_item_after_output,
     write_queue,
 )
 
@@ -107,7 +103,15 @@ def cmd_watch(args) -> int:
             processed = False
             for index, item in enumerate(items):
                 if is_due(item, now):
-                    items[index] = run_due_item(item, now=now, args=args)
+                    items[index] = run_due_item(
+                        item,
+                        now=now,
+                        claude_bin=args.claude_bin,
+                        dry_run=args.dry_run,
+                        retry_delay_seconds=args.retry_delay_seconds,
+                        followup_delay_seconds=args.followup_delay_seconds,
+                        max_attempts=args.max_attempts,
+                    )
                     write_queue(args.queue, items)
                     if items[index].last_output:
                         print(items[index].last_output)
@@ -120,38 +124,12 @@ def cmd_watch(args) -> int:
         time.sleep(args.sleep_seconds)
 
 
-def build_launchd_plist(
-    script_path: Path | None = None,
-    queue_path: Path | None = None,
-    log_path: Path | None = None,
-    interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
-    program: str | None = None,
-) -> str:
-    program = program or str(Path(script_path).expanduser())
-    if queue_path is None or log_path is None:
-        raise TypeError("queue_path and log_path are required")
-    return _build_launchd_plist(
-        program=program,
-        queue_path=queue_path,
-        log_path=log_path,
-        interval_seconds=interval_seconds,
-    )
-
-
-def update_item_after_output(item: QueueItem, output: str, now: int, args) -> QueueItem:
-    return _update_item_after_output(
-        item,
-        output,
-        now=now,
-        retry_delay_seconds=args.retry_delay_seconds,
-        followup_delay_seconds=args.followup_delay_seconds,
-        max_attempts=args.max_attempts,
-    )
-
-
-def cmd_install(args) -> int:
-    program = getattr(args, "program", None) or resolve_default_program()
-    plist = _build_launchd_plist(
+def cmd_launchd_install(args) -> int:
+    program = args.program or resolve_default_program()
+    if not program:
+        print("tokenmaxx is not on PATH. Pass --program /absolute/path/to/tokenmaxx.", file=sys.stderr)
+        return 1
+    plist = build_launchd_plist(
         program=program,
         queue_path=args.queue,
         log_path=args.log_path,
@@ -167,11 +145,11 @@ def cmd_install(args) -> int:
     return 0
 
 
-def resolve_default_program() -> str:
-    return shutil.which("tokenmaxx") or "tokenmaxx"
+def resolve_default_program() -> str | None:
+    return shutil.which("tokenmaxx")
 
 
-def cmd_uninstall(args) -> int:
+def cmd_launchd_uninstall(args) -> int:
     if args.dry_run:
         print(f"Would remove {args.plist_path}")
         return 0
@@ -223,20 +201,26 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--now", type=int, default=0, help=argparse.SUPPRESS)
     watch.set_defaults(func=cmd_watch)
 
-    install = subparsers.add_parser("install", help="write or print a launchd plist, but do not load it")
-    add_common_args(install)
-    install.add_argument("--program", default=None, help="program path/name for launchd ProgramArguments")
-    install.add_argument("--plist-path", type=Path, default=default_plist_path())
-    install.add_argument("--log-path", type=Path, default=default_log_path())
-    install.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
-    install.add_argument("--dry-run", action="store_true")
-    install.set_defaults(func=cmd_install)
+    launchd_install = subparsers.add_parser(
+        "launchd-install",
+        help="write or print a launchd plist, but do not load it",
+    )
+    add_common_args(launchd_install)
+    launchd_install.add_argument("--program", default=None, help="absolute tokenmaxx executable path for launchd")
+    launchd_install.add_argument("--plist-path", type=Path, default=default_plist_path())
+    launchd_install.add_argument("--log-path", type=Path, default=default_log_path())
+    launchd_install.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
+    launchd_install.add_argument("--dry-run", action="store_true")
+    launchd_install.set_defaults(func=cmd_launchd_install)
 
-    uninstall = subparsers.add_parser("uninstall", help="remove tokenmaxx launchd plist, but do not unload it")
-    add_common_args(uninstall)
-    uninstall.add_argument("--plist-path", type=Path, default=default_plist_path())
-    uninstall.add_argument("--dry-run", action="store_true")
-    uninstall.set_defaults(func=cmd_uninstall)
+    launchd_uninstall = subparsers.add_parser(
+        "launchd-uninstall",
+        help="remove tokenmaxx launchd plist, but do not unload it",
+    )
+    add_common_args(launchd_uninstall)
+    launchd_uninstall.add_argument("--plist-path", type=Path, default=default_plist_path())
+    launchd_uninstall.add_argument("--dry-run", action="store_true")
+    launchd_uninstall.set_defaults(func=cmd_launchd_uninstall)
 
     return parser
 
@@ -245,25 +229,3 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
-
-
-__all__ = [
-    "QueueItem",
-    "append_queue_item",
-    "build_launchd_plist",
-    "build_resume_command",
-    "classify_output",
-    "cmd_add",
-    "cmd_install",
-    "cmd_scan",
-    "cmd_status",
-    "cmd_uninstall",
-    "cmd_watch",
-    "is_due",
-    "load_claude_sessions",
-    "load_queue",
-    "main",
-    "queue_lock_path",
-    "run_due_item",
-    "update_item_after_output",
-]

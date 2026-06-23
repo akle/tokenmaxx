@@ -8,13 +8,12 @@ Run the tests:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m unittest scripts/test_tokenmaxx.py -v
 ```
 
 Run syntax checks:
 
 ```bash
-python3 -m py_compile tokenmaxx/*.py scripts/tokenmaxx.py tests/test_package.py scripts/test_tokenmaxx.py
+python3 -m py_compile tokenmaxx/*.py tests/test_tokenmaxx.py
 ```
 
 ## Design Rules

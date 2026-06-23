@@ -111,10 +111,12 @@ def queue_lock(queue: Path, timeout_seconds: int = 10):
 
 def load_queue(path: Path) -> list[QueueItem]:
     path = Path(path).expanduser()
-    if not path.exists():
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
         return []
     items: list[QueueItem] = []
-    for line_no, line in enumerate(path.read_text().splitlines(), start=1):
+    for line_no, line in enumerate(lines, start=1):
         stripped = line.strip()
         if not stripped:
             continue

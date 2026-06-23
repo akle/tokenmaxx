@@ -60,7 +60,7 @@ Dry-run a resume:
 tokenmaxx watch --once --dry-run
 ```
 
-Run one real due resume:
+Run one due resume:
 
 ```bash
 tokenmaxx watch --once
@@ -102,13 +102,13 @@ Keep the response concise and operational.
 Preview the plist:
 
 ```bash
-tokenmaxx install --dry-run
+tokenmaxx launchd-install --dry-run
 ```
 
 Write the plist:
 
 ```bash
-tokenmaxx install
+tokenmaxx launchd-install
 ```
 
 Review it, then load it yourself:
@@ -121,7 +121,7 @@ Unload and remove:
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/com.local.tokenmaxx.plist
-tokenmaxx uninstall
+tokenmaxx launchd-uninstall
 ```
 
 ## Commands
@@ -133,10 +133,10 @@ tokenmaxx add --session-id <uuid>
 tokenmaxx status
 tokenmaxx watch --once --dry-run
 tokenmaxx watch --once
-tokenmaxx install --dry-run
-tokenmaxx install
-tokenmaxx uninstall --dry-run
-tokenmaxx uninstall
+tokenmaxx launchd-install --dry-run
+tokenmaxx launchd-install
+tokenmaxx launchd-uninstall --dry-run
+tokenmaxx launchd-uninstall
 ```
 
 Common flags:
@@ -167,13 +167,12 @@ Run tests:
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m unittest scripts/test_tokenmaxx.py -v
 ```
 
 Run syntax checks:
 
 ```bash
-python3 -m py_compile tokenmaxx/*.py scripts/tokenmaxx.py tests/test_package.py scripts/test_tokenmaxx.py
+python3 -m py_compile tokenmaxx/*.py tests/test_tokenmaxx.py
 ```
 
 Smoke-test without launching Claude:

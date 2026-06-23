@@ -23,7 +23,7 @@ tokenmaxx status
 Review generated launchd plists before loading:
 
 ```bash
-tokenmaxx install --dry-run
+tokenmaxx launchd-install --dry-run
 ```
 
 `tokenmaxx` does not ask for provider credentials and does not bypass provider limits.
