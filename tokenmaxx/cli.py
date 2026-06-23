@@ -7,14 +7,16 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .claude import load_claude_sessions, run_due_item
+from .claude import build_limited_queue_items, load_claude_sessions, run_due_item
 from .config import (
     DEFAULT_FOLLOWUP_DELAY_SECONDS,
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_MAX_SESSION_AGE_HOURS,
     DEFAULT_RETRY_DELAY_SECONDS,
     default_log_path,
     default_plist_path,
+    default_projects_dir,
     default_queue_path,
     default_sessions_dir,
 )
@@ -95,11 +97,45 @@ def cmd_status(args) -> int:
     return 0
 
 
+def autoqueue_limited_sessions(args, items: list[QueueItem], now: int) -> list[QueueItem]:
+    sessions = load_claude_sessions(args.sessions_dir)
+    queued = build_limited_queue_items(
+        sessions,
+        items,
+        projects_dir=args.projects_dir,
+        now=now,
+        max_session_age_hours=args.max_session_age_hours,
+    )
+    if queued:
+        items.extend(queued)
+    return queued
+
+
+def print_autoqueued(count: int) -> None:
+    noun = "session" if count == 1 else "sessions"
+    print(f"Auto-queued {count} {noun}.")
+
+
+def cmd_autoqueue(args) -> int:
+    now = int(args.now or time.time())
+    with queue_lock(args.queue, args.lock_timeout_seconds):
+        items = load_queue(args.queue)
+        queued = autoqueue_limited_sessions(args, items, now)
+        if queued:
+            write_queue(args.queue, items)
+    print_autoqueued(len(queued))
+    return 0
+
+
 def cmd_watch(args) -> int:
     while True:
         now = int(args.now or time.time())
         with queue_lock(args.queue, args.lock_timeout_seconds):
             items = load_queue(args.queue)
+            if args.auto_queue:
+                queued = autoqueue_limited_sessions(args, items, now)
+                if queued:
+                    print_autoqueued(len(queued))
             processed = False
             for index, item in enumerate(items):
                 if is_due(item, now):
@@ -165,6 +201,7 @@ def cmd_launchd_uninstall(args) -> int:
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--queue", type=Path, default=default_queue_path())
     parser.add_argument("--sessions-dir", type=Path, default=default_sessions_dir())
+    parser.add_argument("--projects-dir", type=Path, default=default_projects_dir())
     parser.add_argument("--lock-timeout-seconds", type=int, default=10)
 
 
@@ -189,6 +226,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(status)
     status.set_defaults(func=cmd_status)
 
+    autoqueue = subparsers.add_parser("autoqueue", help="queue recent Claude sessions whose transcripts show a limit error")
+    add_common_args(autoqueue)
+    autoqueue.add_argument("--max-session-age-hours", type=float, default=DEFAULT_MAX_SESSION_AGE_HOURS)
+    autoqueue.add_argument("--now", type=int, default=0, help=argparse.SUPPRESS)
+    autoqueue.set_defaults(func=cmd_autoqueue)
+
     watch = subparsers.add_parser("watch", help="resume due sessions")
     add_common_args(watch)
     watch.add_argument("--claude-bin", default="claude")
@@ -198,6 +241,9 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--sleep-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
     watch.add_argument("--once", action="store_true")
     watch.add_argument("--dry-run", action="store_true")
+    watch.add_argument("--max-session-age-hours", type=float, default=DEFAULT_MAX_SESSION_AGE_HOURS)
+    watch.add_argument("--no-auto-queue", dest="auto_queue", action="store_false")
+    watch.set_defaults(auto_queue=True)
     watch.add_argument("--now", type=int, default=0, help=argparse.SUPPRESS)
     watch.set_defaults(func=cmd_watch)
 

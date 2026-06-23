@@ -12,7 +12,7 @@ Report privately to the maintainers of the repository where you received this pr
 
 ## Security Notes
 
-`tokenmaxx` reads local Claude Code session metadata and can execute `claude --resume <session-id> -p <prompt>` from the session working directory.
+`tokenmaxx` reads local Claude Code session metadata and recent transcript lines to detect usage/rate/session limit errors. It can execute `claude --resume <session-id> -p <prompt>` from the session working directory.
 
 Review the queue before running a watcher:
 

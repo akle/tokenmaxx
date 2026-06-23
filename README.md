@@ -2,7 +2,7 @@
 
 `tokenmaxx` is a limit-aware resume queue for Claude Code sessions.
 
-It watches Claude Code's local session metadata, lets you queue unfinished sessions, and resumes them later with a guarded prompt after the reset window has passed.
+It watches Claude Code's local session metadata and transcripts, queues sessions that appear to have hit a usage/rate/session limit, and resumes them later with a guarded prompt after the reset window has passed.
 
 It does **not** bypass Claude, Anthropic, or provider limits. It only waits, retries later, and stops after a configured number of attempts.
 
@@ -13,10 +13,10 @@ Claude Code can do useful long-running work, but sessions sometimes hit usage, r
 `tokenmaxx` turns that into a local queue:
 
 1. Find Claude Code sessions.
-2. Add the unfinished one to a queue.
-3. Resume due sessions later with a prompt that first asks Claude to verify whether work remains.
-4. Back off on limit output.
-5. Block noisy sessions after repeated attempts.
+2. Read their transcript tails for limit errors.
+3. Queue only sessions that appear to have run out of credits.
+4. Resume due sessions later with a prompt that first asks Claude to verify whether work remains.
+5. Back off on limit output and block noisy sessions after repeated attempts.
 
 ## Install
 
@@ -42,10 +42,10 @@ List local Claude Code sessions:
 tokenmaxx scan
 ```
 
-Queue a session:
+Queue sessions that hit a usage/rate/session limit:
 
 ```bash
-tokenmaxx add --pid 23273
+tokenmaxx autoqueue
 ```
 
 Inspect queue state:
@@ -58,6 +58,12 @@ Dry-run a resume:
 
 ```bash
 tokenmaxx watch --once --dry-run
+```
+
+`watch` runs `autoqueue` first by default. To process only existing queue items:
+
+```bash
+tokenmaxx watch --once --no-auto-queue
 ```
 
 Run one due resume:
@@ -78,6 +84,8 @@ tokenmaxx watch
 
 - Queue state lives at `~/.tokenmaxx/queue.jsonl` by default.
 - Queue writes use a sibling lock file: `queue.jsonl.lock`.
+- Auto-queue reads session metadata in `~/.claude/sessions` and transcript tails in `~/.claude/projects`.
+- Auto-queue only queues sessions whose transcript tail contains usage/rate/session/credit limit text.
 - `watch` processes one due item at a time.
 - Limit output is rescheduled with `--retry-delay-seconds`, default 5 hours.
 - Unknown output is rescheduled with `--followup-delay-seconds`, default 15 minutes.
@@ -128,6 +136,7 @@ tokenmaxx launchd-uninstall
 
 ```bash
 tokenmaxx scan
+tokenmaxx autoqueue
 tokenmaxx add --pid <pid>
 tokenmaxx add --session-id <uuid>
 tokenmaxx status
@@ -144,6 +153,8 @@ Common flags:
 ```bash
 --queue ~/.tokenmaxx/queue.jsonl
 --sessions-dir ~/.claude/sessions
+--projects-dir ~/.claude/projects
+--max-session-age-hours 24
 --retry-delay-seconds 18000
 --followup-delay-seconds 900
 --max-attempts 5

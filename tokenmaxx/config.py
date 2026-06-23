@@ -8,6 +8,7 @@ DEFAULT_RETRY_DELAY_SECONDS = 5 * 60 * 60
 DEFAULT_FOLLOWUP_DELAY_SECONDS = 15 * 60
 DEFAULT_MAX_ATTEMPTS = 5
 DEFAULT_INTERVAL_SECONDS = 300
+DEFAULT_MAX_SESSION_AGE_HOURS = 24.0
 
 DEFAULT_PROMPT = """Continue this Claude Code session only if unfinished.
 
@@ -28,6 +29,10 @@ def default_queue_path() -> Path:
 
 def default_sessions_dir() -> Path:
     return Path.home() / ".claude" / "sessions"
+
+
+def default_projects_dir() -> Path:
+    return Path.home() / ".claude" / "projects"
 
 
 def default_plist_path() -> Path:

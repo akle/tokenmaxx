@@ -25,7 +25,9 @@ class TokenmaxxTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.queue_path = self.root / "queue.jsonl"
         self.sessions_dir = self.root / "sessions"
+        self.projects_dir = self.root / "projects"
         self.sessions_dir.mkdir()
+        self.projects_dir.mkdir()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -34,6 +36,7 @@ class TokenmaxxTests(unittest.TestCase):
         defaults = {
             "queue": self.queue_path,
             "sessions_dir": self.sessions_dir,
+            "projects_dir": self.projects_dir,
             "pid": None,
             "session_id": None,
             "cwd": None,
@@ -46,6 +49,8 @@ class TokenmaxxTests(unittest.TestCase):
             "once": True,
             "sleep_seconds": 0,
             "now": 1000,
+            "auto_queue": True,
+            "max_session_age_hours": 24,
             "program": "/usr/local/bin/tokenmaxx",
             "plist_path": self.root / "com.local.tokenmaxx.plist",
             "log_path": self.root / "tokenmaxx.log",
@@ -57,6 +62,13 @@ class TokenmaxxTests(unittest.TestCase):
     def write_session(self, filename, payload):
         path = self.sessions_dir / filename
         path.write_text(json.dumps(payload))
+        return path
+
+    def write_transcript(self, session_id, text):
+        project_dir = self.projects_dir / "project"
+        project_dir.mkdir(exist_ok=True)
+        path = project_dir / f"{session_id}.jsonl"
+        path.write_text(text)
         return path
 
     def test_queue_round_trip_and_status_helpers(self):
@@ -72,6 +84,7 @@ class TokenmaxxTests(unittest.TestCase):
 
     def test_classify_output_and_retry_updates(self):
         self.assertEqual(classify_output("usage limit reached"), "limited")
+        self.assertEqual(classify_output("ran out of credits"), "limited")
         self.assertEqual(classify_output("Server is temporarily limiting requests"), "limited")
         self.assertEqual(classify_output("DONE"), "done")
         self.assertEqual(classify_output("still working"), "unknown")
@@ -134,6 +147,61 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(load_queue(self.queue_path)[0].session_id, "abc")
 
+    def test_autoqueue_adds_recent_limited_sessions_once(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/already", session_id="already"))
+        self.write_session(
+            "limited.json",
+            {
+                "pid": 1,
+                "status": "idle",
+                "cwd": "/tmp/limited",
+                "sessionId": "limited",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript("limited", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        self.write_session(
+            "old.json",
+            {
+                "pid": 2,
+                "status": "idle",
+                "cwd": "/tmp/old",
+                "sessionId": "old",
+                "updatedAt": 990_000,
+            },
+        )
+        self.write_transcript("old", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        self.write_session(
+            "not-limited.json",
+            {
+                "pid": 4,
+                "status": "idle",
+                "cwd": "/tmp/not-limited",
+                "sessionId": "not-limited",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript("not-limited", '{"type":"assistant","message":{"content":[{"text":"All set"}]}}\n')
+        self.write_session(
+            "already.json",
+            {
+                "pid": 3,
+                "status": "idle",
+                "cwd": "/tmp/already",
+                "sessionId": "already",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript("already", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=0.0005))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 1 session", output.getvalue())
+        self.assertEqual([item.session_id for item in load_queue(self.queue_path)], ["already", "limited"])
+
     def test_run_due_item_dry_run_does_not_mark_done(self):
         item = QueueItem(cwd="/tmp/repo", session_id="abc")
         result = claude.run_due_item(
@@ -155,6 +223,26 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=True))
         self.assertEqual(code, 0)
         self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+
+    def test_watch_autoqueues_before_processing_due_item(self):
+        self.write_session(
+            "limited.json",
+            {
+                "pid": 1,
+                "status": "idle",
+                "cwd": "/tmp/limited",
+                "sessionId": "limited",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript("limited", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, now=1000))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 1 session", output.getvalue())
+        self.assertIn("DRY RUN: claude --resume limited", output.getvalue())
 
     def test_status_prints_next_attempt_and_last_output(self):
         item = QueueItem(
