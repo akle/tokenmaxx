@@ -78,8 +78,10 @@ def classify_output(text: str) -> str:
     if any(marker in lowered for marker in LIMIT_MARKERS):
         return "limited"
     for line in text.splitlines():
-        normalized = line.strip().upper()
-        if normalized == "DONE" or normalized.startswith("STATUS: DONE"):
+        normalized = line.strip().upper().lstrip("*_` ")
+        if normalized.startswith("STATUS: DONE"):
+            return "done"
+        if normalized == "DONE" or normalized.startswith(("DONE ", "DONE.", "DONE!", "DONE:", "DONE-", "DONE*")):
             return "done"
     return "unknown"
 

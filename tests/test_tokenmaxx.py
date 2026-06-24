@@ -87,6 +87,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(classify_output("ran out of credits"), "limited")
         self.assertEqual(classify_output("Server is temporarily limiting requests"), "limited")
         self.assertEqual(classify_output("DONE"), "done")
+        self.assertEqual(classify_output("**DONE.** The work is complete."), "done")
         self.assertEqual(classify_output("still working"), "unknown")
 
         limited = update_item_after_output(
