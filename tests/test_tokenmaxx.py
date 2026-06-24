@@ -1,12 +1,13 @@
 import io
 import json
+import subprocess
 import tempfile
 import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from tokenmaxx import claude, cli, launchd
@@ -45,6 +46,7 @@ class TokenmaxxTests(unittest.TestCase):
             "retry_delay_seconds": 18_000,
             "followup_delay_seconds": 900,
             "max_attempts": 3,
+            "resume_timeout_seconds": 7_200,
             "lock_timeout_seconds": 1,
             "claude_bin": "claude",
             "dry_run": True,
@@ -251,9 +253,47 @@ class TokenmaxxTests(unittest.TestCase):
             retry_delay_seconds=18_000,
             followup_delay_seconds=900,
             max_attempts=3,
+            resume_timeout_seconds=7_200,
         )
         self.assertEqual(result.status, "pending")
         self.assertIn("DRY RUN: claude --resume abc", result.last_output)
+
+    def test_run_due_item_times_out_and_kills_process_group(self):
+        item = QueueItem(cwd="/tmp/repo", session_id="abc")
+        process = Mock()
+        process.pid = 4321
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["claude"], 5),
+            subprocess.TimeoutExpired(["claude"], 1),
+            ("", ""),
+        ]
+        process.poll.return_value = None
+        fake_os = types.SimpleNamespace(killpg=Mock(), getpgid=Mock(return_value=9876))
+        fake_signal = types.SimpleNamespace(SIGTERM=15, SIGKILL=9)
+
+        with patch("tokenmaxx.claude.subprocess.Popen", return_value=process) as popen, patch.object(
+            claude, "os", fake_os, create=True
+        ), patch.object(claude, "signal", fake_signal, create=True):
+            try:
+                result = claude.run_due_item(
+                    item,
+                    now=1000,
+                    claude_bin="claude",
+                    dry_run=False,
+                    retry_delay_seconds=18_000,
+                    followup_delay_seconds=900,
+                    max_attempts=3,
+                    resume_timeout_seconds=5,
+                )
+            except TypeError as exc:
+                self.fail(f"run_due_item should accept a resume timeout: {exc}")
+
+        popen.assert_called_once()
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertEqual(fake_os.killpg.call_count, 2)
+        self.assertEqual(result.status, "pending")
+        self.assertEqual(result.next_attempt_at, 1900)
+        self.assertIn("timed out after 5 seconds", result.last_output)
 
     def test_watch_dry_run_prints_generated_command(self):
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))

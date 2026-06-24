@@ -158,6 +158,7 @@ Common flags:
 --retry-delay-seconds 18000
 --followup-delay-seconds 900
 --max-attempts 5
+--resume-timeout-seconds 14400
 --lock-timeout-seconds 10
 ```
 

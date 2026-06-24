@@ -14,6 +14,7 @@ from .config import (
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_MAX_SESSION_AGE_HOURS,
     DEFAULT_RETRY_DELAY_SECONDS,
+    DEFAULT_RESUME_TIMEOUT_SECONDS,
     default_log_path,
     default_plist_path,
     default_projects_dir,
@@ -147,6 +148,7 @@ def cmd_watch(args) -> int:
                         retry_delay_seconds=args.retry_delay_seconds,
                         followup_delay_seconds=args.followup_delay_seconds,
                         max_attempts=args.max_attempts,
+                        resume_timeout_seconds=args.resume_timeout_seconds,
                     )
                     write_queue(args.queue, items)
                     if items[index].last_output:
@@ -238,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--retry-delay-seconds", type=int, default=DEFAULT_RETRY_DELAY_SECONDS)
     watch.add_argument("--followup-delay-seconds", type=int, default=DEFAULT_FOLLOWUP_DELAY_SECONDS)
     watch.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
+    watch.add_argument("--resume-timeout-seconds", type=int, default=DEFAULT_RESUME_TIMEOUT_SECONDS)
     watch.add_argument("--sleep-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
     watch.add_argument("--once", action="store_true")
     watch.add_argument("--dry-run", action="store_true")
