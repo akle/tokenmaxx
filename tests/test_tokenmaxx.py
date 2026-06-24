@@ -4,8 +4,10 @@ import tempfile
 import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from tokenmaxx import claude, cli, launchd
 from tokenmaxx.queue import (
@@ -88,6 +90,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(classify_output("Server is temporarily limiting requests"), "limited")
         self.assertEqual(classify_output("DONE"), "done")
         self.assertEqual(classify_output("**DONE.** The work is complete."), "done")
+        self.assertEqual(classify_output("Prompt is too long"), "blocked")
         self.assertEqual(classify_output("still working"), "unknown")
 
         limited = update_item_after_output(
@@ -100,6 +103,30 @@ class TokenmaxxTests(unittest.TestCase):
         )
         self.assertEqual(limited.status, "pending")
         self.assertEqual(limited.next_attempt_at, 19_000)
+
+        mexico = ZoneInfo("America/Mexico_City")
+        now = int(datetime(2026, 6, 23, 16, 50, tzinfo=mexico).timestamp())
+        reset_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "You've hit your session limit · resets 5:10pm (America/Mexico_City)",
+            now=now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(reset_limited.status, "pending")
+        self.assertEqual(reset_limited.next_attempt_at, int(datetime(2026, 6, 23, 17, 11, tzinfo=mexico).timestamp()))
+
+        temporary_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited",
+            now=1000,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(temporary_limited.status, "pending")
+        self.assertEqual(temporary_limited.next_attempt_at, 1900)
 
         done = update_item_after_output(
             QueueItem(cwd="/tmp/repo", session_id="abc"),
@@ -121,6 +148,17 @@ class TokenmaxxTests(unittest.TestCase):
         )
         self.assertEqual(blocked.status, "blocked")
         self.assertIn("max attempts", blocked.blocked_reason)
+
+        not_retryable = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "Prompt is too long",
+            now=1000,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(not_retryable.status, "blocked")
+        self.assertIn("not retryable", not_retryable.blocked_reason)
 
     def test_load_claude_sessions_reads_metadata(self):
         self.write_session(

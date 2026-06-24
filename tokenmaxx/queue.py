@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import json
+import re
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:
     import fcntl
@@ -24,6 +27,20 @@ LIMIT_MARKERS = (
     "limit reached",
     "try again later",
 )
+
+NON_RETRYABLE_MARKERS = (
+    "prompt is too long",
+    "context is too long",
+    "context length exceeded",
+    "context window exceeded",
+)
+
+TEMPORARY_LIMIT_MARKERS = (
+    "not your usage limit",
+    "temporarily limiting requests",
+)
+
+RESET_BUFFER_SECONDS = 60
 
 
 @dataclass
@@ -75,6 +92,8 @@ class QueueItem:
 
 def classify_output(text: str) -> str:
     lowered = text.lower()
+    if any(marker in lowered for marker in NON_RETRYABLE_MARKERS):
+        return "blocked"
     if any(marker in lowered for marker in LIMIT_MARKERS):
         return "limited"
     for line in text.splitlines():
@@ -84,6 +103,38 @@ def classify_output(text: str) -> str:
         if normalized == "DONE" or normalized.startswith(("DONE ", "DONE.", "DONE!", "DONE:", "DONE-", "DONE*")):
             return "done"
     return "unknown"
+
+
+def is_temporary_limit(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in TEMPORARY_LIMIT_MARKERS)
+
+
+def reset_time_from_output(text: str, now: int) -> int | None:
+    match = re.search(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?", text, re.IGNORECASE)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    meridiem = match.group(3).lower()
+    if hour < 1 or hour > 12 or minute > 59:
+        return None
+    if meridiem == "pm" and hour != 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+
+    timezone_name = match.group(4)
+    try:
+        timezone = ZoneInfo(timezone_name) if timezone_name else datetime.fromtimestamp(now).astimezone().tzinfo
+    except ZoneInfoNotFoundError:
+        timezone = datetime.fromtimestamp(now).astimezone().tzinfo
+    current = datetime.fromtimestamp(now, timezone)
+    candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    candidate += timedelta(seconds=RESET_BUFFER_SECONDS)
+    if int(candidate.timestamp()) <= now:
+        candidate += timedelta(days=1)
+    return int(candidate.timestamp())
 
 
 def queue_lock_path(queue: Path) -> Path:
@@ -174,13 +225,23 @@ def update_item_after_output(
         item.status = "done"
         item.next_attempt_at = 0
         item.blocked_reason = ""
+    elif verdict == "blocked":
+        item.status = "blocked"
+        item.next_attempt_at = 0
+        item.blocked_reason = "not retryable: " + one_line(output)
     elif int(max_attempts) > 0 and item.attempts >= int(max_attempts):
         item.status = "blocked"
         item.next_attempt_at = 0
         item.blocked_reason = f"max attempts ({max_attempts}) reached after {verdict} output"
     elif verdict == "limited":
         item.status = "pending"
-        item.next_attempt_at = now + int(retry_delay_seconds)
+        reset_at = reset_time_from_output(output, now)
+        if reset_at is not None:
+            item.next_attempt_at = reset_at
+        elif is_temporary_limit(output):
+            item.next_attempt_at = now + int(followup_delay_seconds)
+        else:
+            item.next_attempt_at = now + int(retry_delay_seconds)
     else:
         item.status = "pending"
         item.next_attempt_at = now + int(followup_delay_seconds)
