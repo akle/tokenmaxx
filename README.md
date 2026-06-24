@@ -72,6 +72,30 @@ Run one due resume:
 tokenmaxx watch --once
 ```
 
+Run it in the background on macOS:
+
+```bash
+tokenmaxx start
+```
+
+Check whether the daemon is loaded and what is queued:
+
+```bash
+tokenmaxx status
+```
+
+Read background logs:
+
+```bash
+tokenmaxx logs
+```
+
+Stop the background watcher:
+
+```bash
+tokenmaxx stop
+```
+
 Run as a loop:
 
 ```bash
@@ -92,6 +116,7 @@ tokenmaxx watch
 - Repeated attempts move a session to `blocked`, default after 5 attempts.
 - launchd install writes a plist but does not call `launchctl load`.
 - uninstall removes the plist but does not call `launchctl unload`.
+- `start` and `stop` are explicit convenience commands that do call `launchctl load` and `launchctl unload`.
 
 The resume prompt is guarded:
 
@@ -106,6 +131,17 @@ Keep the response concise and operational.
 ```
 
 ## launchd On macOS
+
+Easy background mode:
+
+```bash
+tokenmaxx start
+tokenmaxx status
+tokenmaxx logs
+tokenmaxx stop
+```
+
+Review-first mode:
 
 Preview the plist:
 
@@ -142,6 +178,9 @@ tokenmaxx add --session-id <uuid>
 tokenmaxx status
 tokenmaxx watch --once --dry-run
 tokenmaxx watch --once
+tokenmaxx start
+tokenmaxx logs
+tokenmaxx stop
 tokenmaxx launchd-install --dry-run
 tokenmaxx launchd-install
 tokenmaxx launchd-uninstall --dry-run

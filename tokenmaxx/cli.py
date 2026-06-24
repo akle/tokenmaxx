@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -21,7 +22,13 @@ from .config import (
     default_queue_path,
     default_sessions_dir,
 )
-from .launchd import build_launchd_plist
+from .launchd import (
+    LABEL,
+    build_launchd_plist,
+    launchctl_load,
+    launchctl_unload,
+    launchd_state,
+)
 from .queue import (
     QueueItem,
     append_queue_item,
@@ -94,8 +101,18 @@ def summarize_queue(items: list[QueueItem], queue: Path) -> None:
 
 
 def cmd_status(args) -> int:
+    print_daemon_state(args)
     summarize_queue(load_queue(args.queue), args.queue)
     return 0
+
+
+def print_daemon_state(args) -> None:
+    state = launchd_state(args.plist_path)
+    loaded = "unknown" if state.loaded is None else ("loaded" if state.loaded else "not loaded")
+    installed = "installed" if state.installed else "not installed"
+    print(f"Daemon: {loaded} ({installed})")
+    print(f"Plist: {args.plist_path}")
+    print(f"Log: {args.log_path}")
 
 
 def autoqueue_limited_sessions(args, items: list[QueueItem], now: int) -> list[QueueItem]:
@@ -167,18 +184,25 @@ def cmd_launchd_install(args) -> int:
     if not program:
         print("tokenmaxx is not on PATH. Pass --program /absolute/path/to/tokenmaxx.", file=sys.stderr)
         return 1
+    queue_path = args.queue.expanduser()
+    log_path = args.log_path.expanduser()
+    plist_path = args.plist_path.expanduser()
     plist = build_launchd_plist(
         program=program,
-        queue_path=args.queue,
-        log_path=args.log_path,
+        queue_path=queue_path,
+        log_path=log_path,
         interval_seconds=args.interval_seconds,
+        sessions_dir=args.sessions_dir,
+        projects_dir=args.projects_dir,
+        lock_timeout_seconds=args.lock_timeout_seconds,
     )
     if args.dry_run:
         print(plist)
         return 0
-    args.plist_path.parent.mkdir(parents=True, exist_ok=True)
-    args.plist_path.write_text(plist)
-    print(f"Wrote {args.plist_path}")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist)
+    print(f"Wrote {plist_path}")
     print("Not loaded. Run `launchctl load <plist>` yourself after reviewing it.")
     return 0
 
@@ -187,15 +211,92 @@ def resolve_default_program() -> str | None:
     return shutil.which("tokenmaxx")
 
 
-def cmd_launchd_uninstall(args) -> int:
-    if args.dry_run:
-        print(f"Would remove {args.plist_path}")
+def cmd_start(args) -> int:
+    program = args.program or resolve_default_program()
+    if not program:
+        print(
+            "tokenmaxx is not on PATH. Run `pipx install .` or pass --program /absolute/path/to/tokenmaxx.",
+            file=sys.stderr,
+        )
+        return 1
+
+    queue_path = args.queue.expanduser()
+    log_path = args.log_path.expanduser()
+    plist_path = args.plist_path.expanduser()
+    plist = build_launchd_plist(
+        program=program,
+        queue_path=queue_path,
+        log_path=log_path,
+        interval_seconds=args.interval_seconds,
+        sessions_dir=args.sessions_dir,
+        projects_dir=args.projects_dir,
+        lock_timeout_seconds=args.lock_timeout_seconds,
+    )
+    queue_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist)
+
+    state = launchd_state(plist_path)
+    if state.loaded:
+        print(f"{LABEL} is already loaded.")
+        print(f"Log: {log_path}")
         return 0
-    if args.plist_path.exists():
-        args.plist_path.unlink()
-        print(f"Removed {args.plist_path}")
+
+    result = launchctl_load(plist_path)
+    if result.returncode != 0:
+        print((result.stderr or result.stdout or "launchctl load failed").strip(), file=sys.stderr)
+        return result.returncode
+
+    print(f"Started {LABEL}")
+    print(f"Log: {log_path}")
+    return 0
+
+
+def cmd_stop(args) -> int:
+    plist_path = args.plist_path.expanduser()
+    state = launchd_state(plist_path)
+    if state.loaded is False:
+        print(f"{LABEL} is not loaded.")
+        return 0
+    if not plist_path.exists():
+        print(f"No plist at {plist_path}", file=sys.stderr)
+        return 1
+
+    result = launchctl_unload(plist_path)
+    if result.returncode != 0:
+        print((result.stderr or result.stdout or "launchctl unload failed").strip(), file=sys.stderr)
+        return result.returncode
+
+    print(f"Stopped {LABEL}")
+    return 0
+
+
+def cmd_logs(args) -> int:
+    log_path = args.log_path.expanduser()
+    if not log_path.exists():
+        print(f"No log at {log_path}")
+        return 0
+    if args.follow:
+        return subprocess.call(["tail", "-f", str(log_path)])
+
+    lines = log_path.read_text(errors="replace").splitlines()
+    selected = lines[-args.lines :] if args.lines > 0 else []
+    if selected:
+        print("\n".join(selected))
+    return 0
+
+
+def cmd_launchd_uninstall(args) -> int:
+    plist_path = args.plist_path.expanduser()
+    if args.dry_run:
+        print(f"Would remove {plist_path}")
+        return 0
+    if plist_path.exists():
+        plist_path.unlink()
+        print(f"Removed {plist_path}")
     else:
-        print(f"No plist at {args.plist_path}")
+        print(f"No plist at {plist_path}")
     print("Not unloaded. Run `launchctl unload <plist>` first if it is currently loaded.")
     return 0
 
@@ -226,6 +327,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="show tokenmaxx queue status")
     add_common_args(status)
+    status.add_argument("--plist-path", type=Path, default=default_plist_path())
+    status.add_argument("--log-path", type=Path, default=default_log_path())
     status.set_defaults(func=cmd_status)
 
     autoqueue = subparsers.add_parser("autoqueue", help="queue recent Claude sessions whose transcripts show a limit error")
@@ -249,6 +352,24 @@ def build_parser() -> argparse.ArgumentParser:
     watch.set_defaults(auto_queue=True)
     watch.add_argument("--now", type=int, default=0, help=argparse.SUPPRESS)
     watch.set_defaults(func=cmd_watch)
+
+    start = subparsers.add_parser("start", help="install and load the macOS launchd background service")
+    add_common_args(start)
+    start.add_argument("--program", default=None, help="absolute tokenmaxx executable path for launchd")
+    start.add_argument("--plist-path", type=Path, default=default_plist_path())
+    start.add_argument("--log-path", type=Path, default=default_log_path())
+    start.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
+    start.set_defaults(func=cmd_start)
+
+    stop = subparsers.add_parser("stop", help="unload the macOS launchd background service")
+    stop.add_argument("--plist-path", type=Path, default=default_plist_path())
+    stop.set_defaults(func=cmd_stop)
+
+    logs = subparsers.add_parser("logs", help="show tokenmaxx log output")
+    logs.add_argument("--log-path", type=Path, default=default_log_path())
+    logs.add_argument("--lines", type=int, default=80)
+    logs.add_argument("--follow", action="store_true")
+    logs.set_defaults(func=cmd_logs)
 
     launchd_install = subparsers.add_parser(
         "launchd-install",

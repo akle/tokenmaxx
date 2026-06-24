@@ -59,6 +59,8 @@ class TokenmaxxTests(unittest.TestCase):
             "plist_path": self.root / "com.local.tokenmaxx.plist",
             "log_path": self.root / "tokenmaxx.log",
             "interval_seconds": 300,
+            "lines": 80,
+            "follow": False,
         }
         defaults.update(kwargs)
         return types.SimpleNamespace(**defaults)
@@ -341,17 +343,38 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("last=usage limit reached", rendered)
         self.assertIn("next=", rendered)
 
+    def test_status_prints_daemon_state(self):
+        self.args().plist_path.write_text("<plist/>")
+        loaded = types.SimpleNamespace(installed=True, loaded=True, detail="loaded")
+
+        output = io.StringIO()
+        with patch("tokenmaxx.cli.launchd_state", return_value=loaded), redirect_stdout(output):
+            cli.cmd_status(self.args())
+
+        rendered = output.getvalue()
+        self.assertIn("Daemon: loaded", rendered)
+        self.assertIn(str(self.args().plist_path), rendered)
+
     def test_build_launchd_plist_contains_watch_command(self):
         plist = launchd.build_launchd_plist(
             program="/usr/local/bin/tokenmaxx",
             queue_path=Path("/tmp/queue.jsonl"),
             log_path=Path("/tmp/tokenmaxx.log"),
             interval_seconds=300,
+            sessions_dir=Path("/tmp/sessions"),
+            projects_dir=Path("/tmp/projects"),
+            lock_timeout_seconds=7,
         )
         self.assertIn("<string>/usr/local/bin/tokenmaxx</string>", plist)
         self.assertIn("<string>watch</string>", plist)
         self.assertIn("<string>--queue</string>", plist)
         self.assertIn("<string>/tmp/queue.jsonl</string>", plist)
+        self.assertIn("<string>--sessions-dir</string>", plist)
+        self.assertIn("<string>/tmp/sessions</string>", plist)
+        self.assertIn("<string>--projects-dir</string>", plist)
+        self.assertIn("<string>/tmp/projects</string>", plist)
+        self.assertIn("<string>--lock-timeout-seconds</string>", plist)
+        self.assertIn("<string>7</string>", plist)
 
     def test_launchd_install_dry_run_prints_plist_without_writing(self):
         output = io.StringIO()
@@ -367,6 +390,61 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_launchd_install(self.args(program=None, dry_run=True))
         self.assertEqual(code, 1)
         self.assertIn("Pass --program", error.getvalue())
+
+    def test_start_writes_plist_and_loads_service(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(command, 3, "", "not loaded")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        output = io.StringIO()
+        args = self.args(
+            program=None,
+            queue=self.root / "state" / "queue.jsonl",
+            log_path=self.root / "logs" / "tokenmaxx.log",
+            plist_path=self.root / "agents" / "com.local.tokenmaxx.plist",
+        )
+        with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
+            "tokenmaxx.launchd.subprocess.run", side_effect=fake_run
+        ), redirect_stdout(output):
+            code = cli.cmd_start(args)
+
+        self.assertEqual(code, 0)
+        self.assertTrue(args.queue.parent.exists())
+        self.assertTrue(args.log_path.parent.exists())
+        self.assertTrue(args.plist_path.exists())
+        self.assertIn("Started com.local.tokenmaxx", output.getvalue())
+        self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
+
+    def test_stop_unloads_loaded_service(self):
+        self.args().plist_path.write_text("<plist/>")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        output = io.StringIO()
+        with patch("tokenmaxx.launchd.subprocess.run", side_effect=fake_run), redirect_stdout(output):
+            code = cli.cmd_stop(self.args())
+
+        self.assertEqual(code, 0)
+        self.assertIn("Stopped com.local.tokenmaxx", output.getvalue())
+        self.assertIn(["launchctl", "unload", str(self.args().plist_path)], calls)
+
+    def test_logs_prints_recent_log_lines(self):
+        self.args().log_path.write_text("one\ntwo\nthree\n")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_logs(self.args(lines=2))
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("one", output.getvalue())
+        self.assertIn("two\nthree\n", output.getvalue())
 
 
 if __name__ == "__main__":
