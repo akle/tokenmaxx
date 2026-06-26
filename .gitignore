@@ -16,3 +16,6 @@ dist/
 
 .DS_Store
 .tokenmaxx/
+
+.dwp/
+tmp/

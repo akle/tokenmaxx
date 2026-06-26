@@ -1,0 +1,15 @@
+{
+  "project": "tokenmaxx",
+  "primary_language": "python",
+  "package_type": "cli",
+  "validation": {
+    "tests": "python3 -m unittest discover -s tests -v",
+    "syntax": "PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py tests/test_tokenmaxx.py",
+    "diff": "git diff --check"
+  },
+  "safety": {
+    "no_secrets_in_docs": true,
+    "daemon_actions_must_be_explicit": true,
+    "provider_limit_bypass_allowed": false
+  }
+}
