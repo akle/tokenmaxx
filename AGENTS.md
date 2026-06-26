@@ -63,7 +63,8 @@ packaging, queue behavior, or the daemon model changes.
   sibling lock file.
 - Keep daemon behavior explicit. `launchd-install` and `launchd-uninstall`
   remain review-first helpers; `start` and `stop` are the commands that load or
-  unload launchd.
+  unload launchd. Launchd plists must record an explicit `--claude-bin` path
+  because launchd does not inherit the interactive shell PATH.
 - Do not add runtime dependencies without a clear packaging reason. The current
   package has no runtime dependencies and should stay easy to install.
 - Do not store secrets in this repo, docs, logs, tests, or `.dwp/`. Claude
@@ -88,6 +89,7 @@ packaging, queue behavior, or the daemon model changes.
 | Syntax check without repo-local bytecode | `PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py tests/test_tokenmaxx.py` |
 | Dry-run queue processing | `python3 -m tokenmaxx watch --once --dry-run --no-auto-queue --queue /tmp/tokenmaxx-smoke-queue.jsonl` |
 | Show CLI help | `python3 -m tokenmaxx --help` |
+| Preview launchd plist | `python3 -m tokenmaxx launchd-install --dry-run --claude-bin /usr/local/bin/claude` |
 | Install from checkout with uv | `uv tool install --force .` |
 | Build/install smoke in a venv | `python3 -m venv /tmp/tokenmaxx-venv && /tmp/tokenmaxx-venv/bin/pip install . && /tmp/tokenmaxx-venv/bin/tokenmaxx --version` |
 | Check git diff hygiene | `git diff --check` |

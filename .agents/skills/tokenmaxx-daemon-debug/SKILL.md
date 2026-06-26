@@ -14,8 +14,10 @@ description: Use when tokenmaxx launchd start, stop, status, logs, or background
    ```
 
 2. Compare launchd plist arguments against `tokenmaxx/launchd.py`.
-3. Check whether launchd's environment differs from the interactive shell.
-4. Reproduce with `python3 -m tokenmaxx watch --once --dry-run --no-auto-queue --queue /tmp/tokenmaxx-smoke-queue.jsonl`
+3. Check whether the plist includes `--claude-bin` with an absolute executable
+   path. Launchd does not inherit the interactive shell PATH.
+4. Check whether launchd's environment differs from the interactive shell.
+5. Reproduce with `python3 -m tokenmaxx watch --once --dry-run --no-auto-queue --queue /tmp/tokenmaxx-smoke-queue.jsonl`
    before a real resume when possible.
-5. Add tests for plist arguments or launchctl wrapper behavior before fixing.
-6. Run the full validation gate before reporting the daemon fixed.
+6. Add tests for plist arguments or launchctl wrapper behavior before fixing.
+7. Run the full validation gate before reporting the daemon fixed.

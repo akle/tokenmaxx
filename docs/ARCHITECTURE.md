@@ -76,7 +76,9 @@ macOS background operation uses launchd:
 - `tokenmaxx logs` prints or follows the configured log file.
 
 The daemon command is a normal `tokenmaxx watch` invocation with queue, sessions,
-projects, lock timeout, and interval arguments recorded in the plist.
+projects, lock timeout, interval, and `--claude-bin` arguments recorded in the
+plist. The Claude executable is resolved at install/start time because launchd
+does not inherit the user's interactive shell PATH.
 
 ## Failure Boundaries
 

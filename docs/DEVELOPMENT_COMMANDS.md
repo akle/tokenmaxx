@@ -38,6 +38,7 @@ python3 -m tokenmaxx scan --help
 python3 -m tokenmaxx autoqueue --help
 python3 -m tokenmaxx watch --once --dry-run --no-auto-queue --queue /tmp/tokenmaxx-smoke-queue.jsonl
 python3 -m tokenmaxx start --help
+python3 -m tokenmaxx launchd-install --dry-run --claude-bin /usr/local/bin/claude
 python3 -m tokenmaxx stop --help
 python3 -m tokenmaxx logs --help
 ```

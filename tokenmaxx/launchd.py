@@ -19,6 +19,7 @@ class LaunchdState:
 
 def build_launchd_plist(
     program: str,
+    claude_bin: str,
     queue_path: Path,
     log_path: Path,
     interval_seconds: int,
@@ -29,6 +30,8 @@ def build_launchd_plist(
     arguments = [
         program,
         "watch",
+        "--claude-bin",
+        str(Path(claude_bin).expanduser()),
         "--queue",
         str(Path(queue_path).expanduser()),
         "--sleep-seconds",

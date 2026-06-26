@@ -36,6 +36,8 @@
 
 - Generated plists must be reviewable XML.
 - Log paths and queue paths must expand user home directories before writing.
+- Plists must record an explicit Claude executable path with `--claude-bin`
+  because launchd uses a restricted default PATH.
 - `launchctl` errors should surface the actual stderr/stdout text.
 - Non-macOS environments should fail clearly instead of pretending the daemon is
   running.

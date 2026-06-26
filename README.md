@@ -141,6 +141,17 @@ tokenmaxx logs
 tokenmaxx stop
 ```
 
+`start` and `launchd-install` resolve the current `claude` executable and record
+that absolute path in the launchd plist. If Claude is not on your shell PATH,
+pass it explicitly:
+
+```bash
+tokenmaxx start --claude-bin /absolute/path/to/claude
+```
+
+If the service is already loaded and daemon arguments change, run `tokenmaxx stop`
+then `tokenmaxx start` so launchd reloads the updated plist.
+
 Review-first mode:
 
 Preview the plist:
@@ -199,6 +210,7 @@ Common flags:
 --max-attempts 5
 --resume-timeout-seconds 14400
 --lock-timeout-seconds 10
+--claude-bin /absolute/path/to/claude
 ```
 
 ## Adjacent Projects

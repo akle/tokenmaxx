@@ -358,6 +358,7 @@ class TokenmaxxTests(unittest.TestCase):
     def test_build_launchd_plist_contains_watch_command(self):
         plist = launchd.build_launchd_plist(
             program="/usr/local/bin/tokenmaxx",
+            claude_bin="/usr/local/bin/claude",
             queue_path=Path("/tmp/queue.jsonl"),
             log_path=Path("/tmp/tokenmaxx.log"),
             interval_seconds=300,
@@ -367,6 +368,8 @@ class TokenmaxxTests(unittest.TestCase):
         )
         self.assertIn("<string>/usr/local/bin/tokenmaxx</string>", plist)
         self.assertIn("<string>watch</string>", plist)
+        self.assertIn("<string>--claude-bin</string>", plist)
+        self.assertIn("<string>/usr/local/bin/claude</string>", plist)
         self.assertIn("<string>--queue</string>", plist)
         self.assertIn("<string>/tmp/queue.jsonl</string>", plist)
         self.assertIn("<string>--sessions-dir</string>", plist)
@@ -379,7 +382,7 @@ class TokenmaxxTests(unittest.TestCase):
     def test_launchd_install_dry_run_prints_plist_without_writing(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            code = cli.cmd_launchd_install(self.args(dry_run=True))
+            code = cli.cmd_launchd_install(self.args(claude_bin="/usr/local/bin/claude", dry_run=True))
         self.assertEqual(code, 0)
         self.assertIn("com.local.tokenmaxx", output.getvalue())
         self.assertFalse(self.root.joinpath("com.local.tokenmaxx.plist").exists())
@@ -403,11 +406,14 @@ class TokenmaxxTests(unittest.TestCase):
         output = io.StringIO()
         args = self.args(
             program=None,
+            claude_bin=None,
             queue=self.root / "state" / "queue.jsonl",
             log_path=self.root / "logs" / "tokenmaxx.log",
             plist_path=self.root / "agents" / "com.local.tokenmaxx.plist",
         )
         with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
+            "tokenmaxx.cli.resolve_default_claude_bin", return_value="/usr/local/bin/claude"
+        ), patch(
             "tokenmaxx.launchd.subprocess.run", side_effect=fake_run
         ), redirect_stdout(output):
             code = cli.cmd_start(args)
@@ -416,8 +422,39 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertTrue(args.queue.parent.exists())
         self.assertTrue(args.log_path.parent.exists())
         self.assertTrue(args.plist_path.exists())
+        self.assertIn("<string>--claude-bin</string>", args.plist_path.read_text())
+        self.assertIn("<string>/usr/local/bin/claude</string>", args.plist_path.read_text())
         self.assertIn("Started com.local.tokenmaxx", output.getvalue())
         self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
+
+    def test_start_warns_when_loaded_service_keeps_old_arguments(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        output = io.StringIO()
+        args = self.args(
+            program=None,
+            claude_bin=None,
+            plist_path=self.root / "agents" / "com.local.tokenmaxx.plist",
+        )
+        args.plist_path.parent.mkdir(parents=True)
+        args.plist_path.write_text("<plist>old</plist>")
+
+        with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
+            "tokenmaxx.cli.resolve_default_claude_bin", return_value="/usr/local/bin/claude"
+        ), patch(
+            "tokenmaxx.launchd.subprocess.run", side_effect=fake_run
+        ), redirect_stdout(output):
+            code = cli.cmd_start(args)
+
+        self.assertEqual(code, 0)
+        self.assertIn("already loaded", output.getvalue())
+        self.assertIn("Run `tokenmaxx stop` then `tokenmaxx start`", output.getvalue())
+        self.assertIn("<string>--claude-bin</string>", args.plist_path.read_text())
+        self.assertNotIn(["launchctl", "load", str(args.plist_path)], calls)
 
     def test_stop_unloads_loaded_service(self):
         self.args().plist_path.write_text("<plist/>")

@@ -184,11 +184,16 @@ def cmd_launchd_install(args) -> int:
     if not program:
         print("tokenmaxx is not on PATH. Pass --program /absolute/path/to/tokenmaxx.", file=sys.stderr)
         return 1
+    claude_bin = resolve_default_claude_bin(args.claude_bin)
+    if not claude_bin:
+        print("claude is not on PATH. Pass --claude-bin /absolute/path/to/claude.", file=sys.stderr)
+        return 1
     queue_path = args.queue.expanduser()
     log_path = args.log_path.expanduser()
     plist_path = args.plist_path.expanduser()
     plist = build_launchd_plist(
         program=program,
+        claude_bin=claude_bin,
         queue_path=queue_path,
         log_path=log_path,
         interval_seconds=args.interval_seconds,
@@ -211,11 +216,26 @@ def resolve_default_program() -> str | None:
     return shutil.which("tokenmaxx")
 
 
+def resolve_default_claude_bin(claude_bin: str | None = None) -> str | None:
+    candidate = claude_bin or "claude"
+    expanded = Path(candidate).expanduser()
+    if expanded.is_absolute():
+        return str(expanded)
+    return shutil.which(candidate)
+
+
 def cmd_start(args) -> int:
     program = args.program or resolve_default_program()
     if not program:
         print(
             "tokenmaxx is not on PATH. Run `pipx install .` or pass --program /absolute/path/to/tokenmaxx.",
+            file=sys.stderr,
+        )
+        return 1
+    claude_bin = resolve_default_claude_bin(args.claude_bin)
+    if not claude_bin:
+        print(
+            "claude is not on PATH. Run `tokenmaxx start --claude-bin /absolute/path/to/claude`.",
             file=sys.stderr,
         )
         return 1
@@ -225,6 +245,7 @@ def cmd_start(args) -> int:
     plist_path = args.plist_path.expanduser()
     plist = build_launchd_plist(
         program=program,
+        claude_bin=claude_bin,
         queue_path=queue_path,
         log_path=log_path,
         interval_seconds=args.interval_seconds,
@@ -235,11 +256,14 @@ def cmd_start(args) -> int:
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     plist_path.parent.mkdir(parents=True, exist_ok=True)
+    previous_plist = plist_path.read_text(errors="replace") if plist_path.exists() else None
     plist_path.write_text(plist)
 
     state = launchd_state(plist_path)
     if state.loaded:
         print(f"{LABEL} is already loaded.")
+        if previous_plist != plist:
+            print("Plist changed. Run `tokenmaxx stop` then `tokenmaxx start` to apply updated launchd arguments.")
         print(f"Log: {log_path}")
         return 0
 
@@ -356,6 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     start = subparsers.add_parser("start", help="install and load the macOS launchd background service")
     add_common_args(start)
     start.add_argument("--program", default=None, help="absolute tokenmaxx executable path for launchd")
+    start.add_argument("--claude-bin", default=None, help="Claude executable path for launchd")
     start.add_argument("--plist-path", type=Path, default=default_plist_path())
     start.add_argument("--log-path", type=Path, default=default_log_path())
     start.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
@@ -377,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_args(launchd_install)
     launchd_install.add_argument("--program", default=None, help="absolute tokenmaxx executable path for launchd")
+    launchd_install.add_argument("--claude-bin", default=None, help="Claude executable path for launchd")
     launchd_install.add_argument("--plist-path", type=Path, default=default_plist_path())
     launchd_install.add_argument("--log-path", type=Path, default=default_log_path())
     launchd_install.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
