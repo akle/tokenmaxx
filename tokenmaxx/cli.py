@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import os
 import shutil
 import subprocess
 import sys
@@ -8,8 +10,14 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .claude import build_limited_queue_items, load_claude_sessions, run_due_item
+from .claude import (
+    build_limited_queue_items,
+    find_active_session,
+    load_claude_sessions,
+    run_due_item,
+)
 from .config import (
+    DEFAULT_ACTIVE_GRACE_SECONDS,
     DEFAULT_FOLLOWUP_DELAY_SECONDS,
     DEFAULT_INTERVAL_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
@@ -32,8 +40,10 @@ from .launchd import (
 from .queue import (
     QueueItem,
     append_queue_item,
+    defer_item,
     is_due,
     load_queue,
+    merge_resumed_item,
     one_line,
     queue_lock,
     write_queue,
@@ -54,6 +64,12 @@ def format_time(epoch: int) -> str:
     if not epoch:
         return "-"
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
+def log_line(message: str) -> None:
+    # flush=True: the daemon's stdout goes to a file, where Python block-buffers
+    # and `tokenmaxx logs` would lag hours behind the queue otherwise.
+    print(f"[{format_time(int(time.time()))}] {message}", flush=True)
 
 
 def print_sessions(sessions: list[dict]) -> None:
@@ -115,8 +131,7 @@ def print_daemon_state(args) -> None:
     print(f"Log: {args.log_path}")
 
 
-def autoqueue_limited_sessions(args, items: list[QueueItem], now: int) -> list[QueueItem]:
-    sessions = load_claude_sessions(args.sessions_dir)
+def autoqueue_limited_sessions(args, items: list[QueueItem], now: int, sessions: list[dict]) -> list[QueueItem]:
     queued = build_limited_queue_items(
         sessions,
         items,
@@ -129,49 +144,120 @@ def autoqueue_limited_sessions(args, items: list[QueueItem], now: int) -> list[Q
     return queued
 
 
-def print_autoqueued(count: int) -> None:
+def autoqueued_message(count: int) -> str:
     noun = "session" if count == 1 else "sessions"
-    print(f"Auto-queued {count} {noun}.")
+    return f"Auto-queued {count} {noun}."
 
 
 def cmd_autoqueue(args) -> int:
     now = int(args.now or time.time())
+    sessions = load_claude_sessions(args.sessions_dir)
     with queue_lock(args.queue, args.lock_timeout_seconds):
         items = load_queue(args.queue)
-        queued = autoqueue_limited_sessions(args, items, now)
+        queued = autoqueue_limited_sessions(args, items, now, sessions)
         if queued:
             write_queue(args.queue, items)
-    print_autoqueued(len(queued))
+    print(autoqueued_message(len(queued)))
     return 0
+
+
+def cmd_drop(args) -> int:
+    # Tombstone instead of deleting: auto-queue dedupes against session ids
+    # still present in the queue, so a deleted row would be re-queued (and
+    # resumed) on the daemon's next cycle while the transcript still ends on
+    # a limit banner.
+    now = int(time.time())
+    with queue_lock(args.queue, args.lock_timeout_seconds):
+        items = load_queue(args.queue)
+        dropped = False
+        for item in items:
+            if item.session_id == args.session_id:
+                item.status = "blocked"
+                item.blocked_reason = "dropped by user"
+                item.next_attempt_at = 0
+                item.updated_at = now
+                dropped = True
+        if not dropped:
+            print(f"No queued item for session {args.session_id}.", file=sys.stderr)
+            return 1
+        write_queue(args.queue, items)
+    print(f"Dropped {args.session_id}. Kept as a blocked tombstone so auto-queue will not re-add it.")
+    return 0
+
+
+def run_resume(args, item: QueueItem, now: int) -> QueueItem:
+    return run_due_item(
+        item,
+        now=now,
+        claude_bin=args.claude_bin,
+        dry_run=args.dry_run,
+        retry_delay_seconds=args.retry_delay_seconds,
+        followup_delay_seconds=args.followup_delay_seconds,
+        max_attempts=args.max_attempts,
+        resume_timeout_seconds=args.resume_timeout_seconds,
+    )
 
 
 def cmd_watch(args) -> int:
     while True:
         now = int(args.now or time.time())
+        resume_item = None
+        processed = False
         with queue_lock(args.queue, args.lock_timeout_seconds):
             items = load_queue(args.queue)
+            dirty = False
             if args.auto_queue:
-                queued = autoqueue_limited_sessions(args, items, now)
+                queued = autoqueue_limited_sessions(args, items, now, load_claude_sessions(args.sessions_dir))
                 if queued:
-                    print_autoqueued(len(queued))
-            processed = False
+                    dirty = True
+                    log_line(autoqueued_message(len(queued)))
             for index, item in enumerate(items):
-                if is_due(item, now):
-                    items[index] = run_due_item(
-                        item,
-                        now=now,
-                        claude_bin=args.claude_bin,
-                        dry_run=args.dry_run,
-                        retry_delay_seconds=args.retry_delay_seconds,
-                        followup_delay_seconds=args.followup_delay_seconds,
-                        max_attempts=args.max_attempts,
-                        resume_timeout_seconds=args.resume_timeout_seconds,
-                    )
-                    write_queue(args.queue, items)
+                if not is_due(item, now):
+                    continue
+                # Fresh session snapshot per due item: the auto-queue transcript
+                # scan above can take seconds, and the guard should act on data
+                # milliseconds old. The residual check-to-resume window is
+                # irreducible in a poll-based design.
+                owner = find_active_session(
+                    load_claude_sessions(args.sessions_dir), item.session_id, now, DEFAULT_ACTIVE_GRACE_SECONDS
+                )
+                if owner is not None:
+                    reason = f"session active in pid {owner.get('pid')}"
+                    if args.dry_run:
+                        log_line(f"Would defer {item.session_id}: {reason}.")
+                    else:
+                        items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
+                        dirty = True
+                        log_line(f"Deferred {item.session_id}: {reason}.")
+                    continue
+                if args.dry_run:
+                    items[index] = run_resume(args, item, now)
+                    dirty = True
                     if items[index].last_output:
-                        print(items[index].last_output)
+                        log_line(items[index].last_output)
                     processed = True
                     break
+                # Claim with a lease and resume OUTSIDE the lock, so status,
+                # add, and drop stay usable during a resume that can run for
+                # hours. If this process dies mid-resume, the lease expires and
+                # the item resurfaces.
+                resume_item = dataclasses.replace(item)
+                lease_seconds = args.resume_timeout_seconds if args.resume_timeout_seconds > 0 else 86_400
+                item.next_attempt_at = now + lease_seconds + 300
+                item.updated_at = now
+                dirty = True
+                processed = True
+                break
+            if dirty:
+                write_queue(args.queue, items)
+        if resume_item is not None:
+            updated = run_resume(args, resume_item, now)
+            if updated.last_output:
+                log_line(updated.last_output)
+            with queue_lock(args.queue, args.lock_timeout_seconds):
+                items = load_queue(args.queue)
+                merge_resumed_item(items, updated)
+                write_queue(args.queue, items)
         if args.once:
             if not processed:
                 print("No due items.")
@@ -200,6 +286,7 @@ def cmd_launchd_install(args) -> int:
         sessions_dir=args.sessions_dir,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
+        path_env=os.environ.get("PATH"),
     )
     if args.dry_run:
         print(plist)
@@ -252,6 +339,7 @@ def cmd_start(args) -> int:
         sessions_dir=args.sessions_dir,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
+        path_env=os.environ.get("PATH"),
     )
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,6 +443,14 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--log-path", type=Path, default=default_log_path())
     status.set_defaults(func=cmd_status)
 
+    drop = subparsers.add_parser(
+        "drop",
+        help="stop retrying a session (keeps a blocked tombstone so auto-queue will not re-add it)",
+    )
+    add_common_args(drop)
+    drop.add_argument("--session-id", required=True)
+    drop.set_defaults(func=cmd_drop)
+
     autoqueue = subparsers.add_parser("autoqueue", help="queue recent Claude sessions whose transcripts show a limit error")
     add_common_args(autoqueue)
     autoqueue.add_argument("--max-session-age-hours", type=float, default=DEFAULT_MAX_SESSION_AGE_HOURS)
@@ -424,4 +520,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except TimeoutError:
+        print(
+            "Queue is locked by another tokenmaxx process. Retry in a moment, or run `tokenmaxx stop` first.",
+            file=sys.stderr,
+        )
+        return 1

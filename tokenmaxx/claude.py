@@ -38,15 +38,54 @@ def find_transcript(projects_dir: Path, session_id: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def transcript_tail(path: Path, max_lines: int = 80) -> str:
-    return "\n".join(path.read_text(errors="replace").splitlines()[-max_lines:])
+SYNTHETIC_MODEL = "<synthetic>"
+
+
+def transcript_tail_records(path: Path, max_lines: int = 80) -> list[dict]:
+    records: list[dict] = []
+    for line in path.read_text(errors="replace").splitlines()[-max_lines:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            record = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def message_text(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+    return ""
 
 
 def session_hit_limit(session: dict, projects_dir: Path) -> bool:
+    """True when the session's last assistant activity is a limit banner.
+
+    Limit banners arrive as synthetic assistant records (model "<synthetic>").
+    Matching only those — instead of raw transcript text — keeps sessions that
+    merely *talk about* limits (tool output, file contents) out of the queue,
+    and skips sessions that already resumed past a limit.
+    """
     transcript = find_transcript(projects_dir, str(session.get("sessionId")))
     if transcript is None:
         return False
-    return classify_output(transcript_tail(transcript)) == "limited"
+    for record in reversed(transcript_tail_records(transcript)):
+        message = record.get("message")
+        if record.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        if message.get("model") == SYNTHETIC_MODEL:
+            if classify_output(message_text(message)) == "limited":
+                return True
+            continue
+        return False
+    return False
 
 
 def build_limited_queue_items(
@@ -73,6 +112,40 @@ def build_limited_queue_items(
         items.append(item)
         existing_ids.add(session_id)
     return items
+
+
+def pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, TypeError, ValueError, OverflowError):
+        return False
+    except PermissionError:
+        # Alive but owned by another user: Claude Code always runs as the
+        # session's user, so this pid was recycled by an unrelated process.
+        return False
+    return True
+
+
+# A genuinely busy Claude bumps its session file constantly; a "busy" file
+# frozen for a day is a crash leftover whose pid may have been recycled to an
+# unrelated same-user process.
+BUSY_STALENESS_SECONDS = 24 * 60 * 60
+
+
+def session_is_active(session: dict, now: int, grace_seconds: int) -> bool:
+    if not pid_alive(session.get("pid")):
+        return False
+    age = now - session_updated_at_seconds(session)
+    if session.get("status") == "busy":
+        return age < BUSY_STALENESS_SECONDS
+    return age < grace_seconds
+
+
+def find_active_session(sessions: list[dict], session_id: str, now: int, grace_seconds: int) -> dict | None:
+    for session in sessions:
+        if str(session.get("sessionId")) == session_id and session_is_active(session, now, grace_seconds):
+            return session
+    return None
 
 
 def build_resume_command(item: QueueItem, claude_bin: str, prompt: str = DEFAULT_PROMPT) -> list[str]:

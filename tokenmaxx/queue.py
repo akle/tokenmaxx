@@ -24,6 +24,7 @@ LIMIT_MARKERS = (
     "rate limited",
     "temporarily limiting requests",
     "session limit",
+    "hit your limit",
     "limit reached",
     "try again later",
 )
@@ -94,14 +95,16 @@ def classify_output(text: str) -> str:
     lowered = text.lower()
     if any(marker in lowered for marker in NON_RETRYABLE_MARKERS):
         return "blocked"
-    if any(marker in lowered for marker in LIMIT_MARKERS):
-        return "limited"
+    # DONE wins over limit markers: a completed resume often *mentions* limits
+    # in its summary, while a genuinely limited attempt never emits a DONE line.
     for line in text.splitlines():
         normalized = line.strip().upper().lstrip("*_` ")
         if normalized.startswith("STATUS: DONE"):
             return "done"
         if normalized == "DONE" or normalized.startswith(("DONE ", "DONE.", "DONE!", "DONE:", "DONE-", "DONE*")):
             return "done"
+    if any(marker in lowered for marker in LIMIT_MARKERS):
+        return "limited"
     return "unknown"
 
 
@@ -110,13 +113,31 @@ def is_temporary_limit(text: str) -> bool:
     return any(marker in lowered for marker in TEMPORARY_LIMIT_MARKERS)
 
 
+MONTHS_BY_PREFIX = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+# Weekly limits reset within 7 days; a parsed reset further out than this is
+# quoted/stale text in the output, not a real banner.
+RESET_MAX_HORIZON_SECONDS = 8 * 86_400
+
+
 def reset_time_from_output(text: str, now: int) -> int | None:
-    match = re.search(r"resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?", text, re.IGNORECASE)
+    # Dated banners use two separators: "resets Apr 23, 2pm" and
+    # "resets May 12 at 2pm".
+    match = re.search(
+        r"resets?\s+(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*|\s+at\s+))?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?",
+        text,
+        re.IGNORECASE,
+    )
     if not match:
         return None
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
-    meridiem = match.group(3).lower()
+    month = MONTHS_BY_PREFIX.get((match.group(1) or "")[:3].lower())
+    day = int(match.group(2)) if month and match.group(2) else None
+    hour = int(match.group(3))
+    minute = int(match.group(4) or 0)
+    meridiem = match.group(5).lower()
     if hour < 1 or hour > 12 or minute > 59:
         return None
     if meridiem == "pm" and hour != 12:
@@ -124,16 +145,29 @@ def reset_time_from_output(text: str, now: int) -> int | None:
     elif meridiem == "am" and hour == 12:
         hour = 0
 
-    timezone_name = match.group(4)
+    timezone_name = match.group(6)
     try:
         timezone = ZoneInfo(timezone_name) if timezone_name else datetime.fromtimestamp(now).astimezone().tzinfo
     except ZoneInfoNotFoundError:
         timezone = datetime.fromtimestamp(now).astimezone().tzinfo
     current = datetime.fromtimestamp(now, timezone)
-    candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    candidate += timedelta(seconds=RESET_BUFFER_SECONDS)
-    if int(candidate.timestamp()) <= now:
-        candidate += timedelta(days=1)
+    try:
+        if month and day:
+            candidate = current.replace(month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
+        else:
+            candidate = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        candidate += timedelta(seconds=RESET_BUFFER_SECONDS)
+        if int(candidate.timestamp()) <= now:
+            if month and day:
+                candidate = candidate.replace(year=candidate.year + 1)
+            else:
+                candidate += timedelta(days=1)
+    except ValueError:
+        # Matched text carried an impossible date (e.g. "Feb 29" rolled into a
+        # non-leap year); fall back to the plain retry delay.
+        return None
+    if int(candidate.timestamp()) - now > RESET_MAX_HORIZON_SECONDS:
+        return None
     return int(candidate.timestamp())
 
 
@@ -200,6 +234,28 @@ def append_queue_item(path: Path, item: QueueItem) -> None:
 def is_due(item: QueueItem, now: int | None = None) -> bool:
     now = int(time.time() if now is None else now)
     return item.status == "pending" and int(item.next_attempt_at or 0) <= now
+
+
+def defer_item(item: QueueItem, now: int, delay_seconds: int, reason: str) -> QueueItem:
+    item.updated_at = now
+    item.next_attempt_at = now + int(delay_seconds)
+    item.last_output = reason
+    return item
+
+
+def merge_resumed_item(items: list[QueueItem], updated: QueueItem) -> None:
+    """Fold the result of an out-of-lock resume back into a reloaded queue.
+
+    The result lands on the first still-pending row for the session — the row
+    that carried the lease. Matching by session id alone would hit a blocked
+    tombstone when the session was re-added after a drop. No pending row means
+    the item was resolved mid-resume (dropped, or deleted manually); that
+    decision wins and the resume result is discarded.
+    """
+    for index, existing in enumerate(items):
+        if existing.session_id == updated.session_id and existing.status == "pending":
+            items[index] = updated
+            return
 
 
 def truncate_output(text: str, max_chars: int = 2000) -> str:

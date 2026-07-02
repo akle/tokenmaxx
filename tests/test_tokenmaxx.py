@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import re
 import subprocess
 import tempfile
 import types
@@ -17,9 +19,30 @@ from tokenmaxx.queue import (
     classify_output,
     is_due,
     load_queue,
+    merge_resumed_item,
     queue_lock_path,
     update_item_after_output,
 )
+
+DEAD_PID = 4_190_000  # above macOS/Linux default pid ranges, never a live process
+
+
+def synthetic_line(text):
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": text}]},
+        }
+    ) + "\n"
+
+
+def assistant_line(text):
+    return json.dumps(
+        {
+            "type": "assistant",
+            "message": {"model": "claude-sonnet-4-6", "role": "assistant", "content": [{"type": "text", "text": text}]},
+        }
+    ) + "\n"
 
 
 class TokenmaxxTests(unittest.TestCase):
@@ -92,8 +115,10 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(classify_output("usage limit reached"), "limited")
         self.assertEqual(classify_output("ran out of credits"), "limited")
         self.assertEqual(classify_output("Server is temporarily limiting requests"), "limited")
+        self.assertEqual(classify_output("You've hit your limit · resets 7pm (America/Mexico_City)"), "limited")
         self.assertEqual(classify_output("DONE"), "done")
         self.assertEqual(classify_output("**DONE.** The work is complete."), "done")
+        self.assertEqual(classify_output("DONE. Resumed after the usage limit reset and finished."), "done")
         self.assertEqual(classify_output("Prompt is too long"), "blocked")
         self.assertEqual(classify_output("still working"), "unknown")
 
@@ -131,6 +156,69 @@ class TokenmaxxTests(unittest.TestCase):
         )
         self.assertEqual(temporary_limited.status, "pending")
         self.assertEqual(temporary_limited.next_attempt_at, 1900)
+
+        dated_now = int(datetime(2026, 4, 20, 10, 0, tzinfo=mexico).timestamp())
+        dated_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "You've hit your limit · resets Apr 23, 2pm (America/Mexico_City)",
+            now=dated_now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(dated_limited.status, "pending")
+        self.assertEqual(dated_limited.next_attempt_at, int(datetime(2026, 4, 23, 14, 1, tzinfo=mexico).timestamp()))
+
+        rollover_now = int(datetime(2026, 12, 30, 10, 0, tzinfo=mexico).timestamp())
+        rollover_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "You've hit your limit · resets Jan 2, 2pm (America/Mexico_City)",
+            now=rollover_now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(rollover_limited.status, "pending")
+        self.assertEqual(rollover_limited.next_attempt_at, int(datetime(2027, 1, 2, 14, 1, tzinfo=mexico).timestamp()))
+
+        at_now = int(datetime(2026, 5, 9, 10, 0, tzinfo=mexico).timestamp())
+        at_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "You've hit your limit · resets May 12 at 2pm (America/Mexico_City)",
+            now=at_now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(at_limited.status, "pending")
+        self.assertEqual(at_limited.next_attempt_at, int(datetime(2026, 5, 12, 14, 1, tzinfo=mexico).timestamp()))
+
+        # "Feb 29" rolled into a non-leap year must not crash the daemon.
+        leap_now = int(datetime(2028, 3, 1, 10, 0, tzinfo=mexico).timestamp())
+        leap_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "usage limit reached · resets Feb 29, 2pm (America/Mexico_City)",
+            now=leap_now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(leap_limited.status, "pending")
+        self.assertEqual(leap_limited.next_attempt_at, leap_now + 18_000)
+
+        # A stale quoted date far in the past must fall back to the retry
+        # delay, not park the item for ~a year.
+        stale_now = int(datetime(2026, 5, 9, 10, 0, tzinfo=mexico).timestamp())
+        stale_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="abc"),
+            "usage limit reached · resets Apr 23, 2pm (America/Mexico_City)",
+            now=stale_now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(stale_limited.status, "pending")
+        self.assertEqual(stale_limited.next_attempt_at, stale_now + 18_000)
 
         done = update_item_after_output(
             QueueItem(cwd="/tmp/repo", session_id="abc"),
@@ -202,7 +290,7 @@ class TokenmaxxTests(unittest.TestCase):
                 "updatedAt": 999_000,
             },
         )
-        self.write_transcript("limited", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        self.write_transcript("limited", synthetic_line("You've hit your session limit · resets 5:10pm (America/Mexico_City)"))
         self.write_session(
             "old.json",
             {
@@ -213,7 +301,7 @@ class TokenmaxxTests(unittest.TestCase):
                 "updatedAt": 990_000,
             },
         )
-        self.write_transcript("old", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        self.write_transcript("old", synthetic_line("You've hit your session limit · resets 5:10pm (America/Mexico_City)"))
         self.write_session(
             "not-limited.json",
             {
@@ -224,7 +312,7 @@ class TokenmaxxTests(unittest.TestCase):
                 "updatedAt": 999_000,
             },
         )
-        self.write_transcript("not-limited", '{"type":"assistant","message":{"content":[{"text":"All set"}]}}\n')
+        self.write_transcript("not-limited", assistant_line("All set"))
         self.write_session(
             "already.json",
             {
@@ -235,7 +323,7 @@ class TokenmaxxTests(unittest.TestCase):
                 "updatedAt": 999_000,
             },
         )
-        self.write_transcript("already", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        self.write_transcript("already", synthetic_line("You've hit your session limit · resets 5:10pm (America/Mexico_City)"))
 
         output = io.StringIO()
         with redirect_stdout(output):
@@ -244,6 +332,54 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Auto-queued 1 session", output.getvalue())
         self.assertEqual([item.session_id for item in load_queue(self.queue_path)], ["already", "limited"])
+
+    def test_autoqueue_ignores_limit_text_in_regular_messages(self):
+        self.write_session(
+            "meta.json",
+            {
+                "pid": 5,
+                "status": "idle",
+                "cwd": "/tmp/meta",
+                "sessionId": "meta",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript(
+            "meta",
+            assistant_line("The queue marks items limited when output says usage limit reached."),
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 0 sessions", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path), [])
+
+    def test_autoqueue_skips_session_resumed_after_limit(self):
+        self.write_session(
+            "resumed.json",
+            {
+                "pid": 6,
+                "status": "idle",
+                "cwd": "/tmp/resumed",
+                "sessionId": "resumed",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript(
+            "resumed",
+            synthetic_line("You've hit your session limit · resets 5:10pm (America/Mexico_City)")
+            + assistant_line("Resumed after the reset and finished the task."),
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(load_queue(self.queue_path), [])
 
     def test_run_due_item_dry_run_does_not_mark_done(self):
         item = QueueItem(cwd="/tmp/repo", session_id="abc")
@@ -304,6 +440,140 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=True))
         self.assertEqual(code, 0)
         self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+        self.assertRegex(output.getvalue(), r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]")
+
+    def test_watch_defers_item_owned_by_busy_session(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        self.write_session(
+            "owner.json",
+            {
+                "pid": os.getpid(),
+                "status": "busy",
+                "cwd": "/tmp/repo",
+                "sessionId": "abc",
+                "updatedAt": (now - 7200) * 1000,
+            },
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=False, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Deferred abc", output.getvalue())
+        self.assertNotIn("DRY RUN", output.getvalue())
+        item = load_queue(self.queue_path)[0]
+        self.assertEqual(item.status, "pending")
+        self.assertEqual(item.attempts, 0)
+        self.assertEqual(item.next_attempt_at, now + 900)
+
+    def test_watch_dry_run_reports_defer_without_mutating(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        self.write_session(
+            "owner.json",
+            {
+                "pid": os.getpid(),
+                "status": "busy",
+                "cwd": "/tmp/repo",
+                "sessionId": "abc",
+                "updatedAt": (now - 10) * 1000,
+            },
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Would defer abc", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].next_attempt_at, 0)
+
+    def test_watch_defers_item_owned_by_recently_active_session(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        self.write_session(
+            "owner.json",
+            {
+                "pid": os.getpid(),
+                "status": "idle",
+                "cwd": "/tmp/repo",
+                "sessionId": "abc",
+                "updatedAt": (now - 10) * 1000,
+            },
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=False, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Deferred abc", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].next_attempt_at, now + 900)
+
+    def test_watch_resumes_item_with_stale_busy_session_file(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        self.write_session(
+            "owner.json",
+            {
+                "pid": os.getpid(),
+                "status": "busy",
+                "cwd": "/tmp/repo",
+                "sessionId": "abc",
+                "updatedAt": (now - 100_000) * 1000,
+            },
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+
+    def test_watch_resumes_item_with_stale_idle_session(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        self.write_session(
+            "owner.json",
+            {
+                "pid": os.getpid(),
+                "status": "idle",
+                "cwd": "/tmp/repo",
+                "sessionId": "abc",
+                "updatedAt": (now - 7200) * 1000,
+            },
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+
+    def test_watch_resumes_item_whose_owner_process_died(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        self.write_session(
+            "owner.json",
+            {
+                "pid": DEAD_PID,
+                "status": "busy",
+                "cwd": "/tmp/repo",
+                "sessionId": "abc",
+                "updatedAt": now * 1000,
+            },
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
 
     def test_watch_autoqueues_before_processing_due_item(self):
         self.write_session(
@@ -316,7 +586,7 @@ class TokenmaxxTests(unittest.TestCase):
                 "updatedAt": 999_000,
             },
         )
-        self.write_transcript("limited", '{"type":"assistant","message":{"content":[{"text":"You have hit your session limit"}]}}\n')
+        self.write_transcript("limited", synthetic_line("You've hit your session limit · resets 5:10pm (America/Mexico_City)"))
         output = io.StringIO()
         with redirect_stdout(output):
             code = cli.cmd_watch(self.args(dry_run=True, now=1000))
@@ -379,6 +649,131 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>--lock-timeout-seconds</string>", plist)
         self.assertIn("<string>7</string>", plist)
 
+    def test_build_launchd_plist_embeds_path_environment(self):
+        plist = launchd.build_launchd_plist(
+            program="/usr/local/bin/tokenmaxx",
+            claude_bin="/usr/local/bin/claude",
+            queue_path=Path("/tmp/queue.jsonl"),
+            log_path=Path("/tmp/tokenmaxx.log"),
+            interval_seconds=300,
+            path_env="/opt/custom/bin:/usr/bin:/bin",
+        )
+        self.assertIn("<key>EnvironmentVariables</key>", plist)
+        self.assertIn("<key>PATH</key>", plist)
+        self.assertIn("<string>/opt/custom/bin:/usr/bin:/bin</string>", plist)
+
+    def test_drop_tombstones_queue_item(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="keep"))
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_drop(self.args(session_id="abc"))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Dropped abc", output.getvalue())
+        dropped, kept = load_queue(self.queue_path)
+        self.assertEqual(dropped.status, "blocked")
+        self.assertEqual(dropped.blocked_reason, "dropped by user")
+        self.assertFalse(is_due(dropped))
+        self.assertEqual(kept.status, "pending")
+
+    def test_drop_reports_missing_session(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="keep"))
+
+        error = io.StringIO()
+        with redirect_stderr(error):
+            code = cli.cmd_drop(self.args(session_id="missing"))
+
+        self.assertEqual(code, 1)
+        self.assertIn("No queued item", error.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].status, "pending")
+
+    def test_dropped_session_is_not_requeued_or_resumed_by_watch(self):
+        self.write_session(
+            "limited.json",
+            {
+                "pid": DEAD_PID,
+                "status": "idle",
+                "cwd": "/tmp/limited",
+                "sessionId": "limited",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript("limited", synthetic_line("You've hit your session limit · resets 5:10pm (America/Mexico_City)"))
+
+        with redirect_stdout(io.StringIO()):
+            cli.cmd_autoqueue(self.args(now=1000))
+            cli.cmd_drop(self.args(session_id="limited"))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, now=1000))
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("Auto-queued", output.getvalue())
+        self.assertNotIn("DRY RUN", output.getvalue())
+        items = load_queue(self.queue_path)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status, "blocked")
+
+    def test_watch_claims_resume_with_lease_and_merges_result(self):
+        now = 1_000_000
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        updated = QueueItem(cwd="/tmp/repo", session_id="abc", status="done", attempts=1, last_output="DONE")
+
+        observed = {}
+
+        def fake_run(item, **kwargs):
+            observed["item"] = item
+            observed["queue_at_resume"] = load_queue(self.queue_path)
+            return updated
+
+        output = io.StringIO()
+        with patch("tokenmaxx.cli.run_due_item", side_effect=fake_run), redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=False, now=now, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        self.assertTrue(is_due(observed["item"], now))
+        lease_row = observed["queue_at_resume"][0]
+        self.assertEqual(lease_row.status, "pending")
+        self.assertGreater(lease_row.next_attempt_at, now + 7_200)
+        final = load_queue(self.queue_path)[0]
+        self.assertEqual(final.status, "done")
+        self.assertEqual(final.attempts, 1)
+
+    def test_merge_resumed_item_respects_midflight_resolution(self):
+        pending = [QueueItem(cwd="/tmp/repo", session_id="abc", status="pending")]
+        done = QueueItem(cwd="/tmp/repo", session_id="abc", status="done", attempts=1)
+        merge_resumed_item(pending, done)
+        self.assertEqual(pending[0].status, "done")
+
+        tombstoned = [QueueItem(cwd="/tmp/repo", session_id="abc", status="blocked", blocked_reason="dropped by user")]
+        merge_resumed_item(tombstoned, done)
+        self.assertEqual(tombstoned[0].status, "blocked")
+        self.assertEqual(tombstoned[0].blocked_reason, "dropped by user")
+
+        # A session re-added after a drop: the result must land on the pending
+        # row, not stop at the blocked tombstone.
+        readded = [
+            QueueItem(cwd="/tmp/repo", session_id="abc", status="blocked", blocked_reason="dropped by user"),
+            QueueItem(cwd="/tmp/repo", session_id="abc", status="pending"),
+        ]
+        merge_resumed_item(readded, done)
+        self.assertEqual(readded[0].status, "blocked")
+        self.assertEqual(readded[1].status, "done")
+
+        deleted: list[QueueItem] = []
+        merge_resumed_item(deleted, done)
+        self.assertEqual(deleted, [])
+
+    def test_main_reports_locked_queue_without_traceback(self):
+        error = io.StringIO()
+        with patch("tokenmaxx.cli.queue_lock", side_effect=TimeoutError("locked")), redirect_stderr(error):
+            code = cli.main(["drop", "--session-id", "x", "--queue", str(self.queue_path)])
+
+        self.assertEqual(code, 1)
+        self.assertIn("locked by another tokenmaxx process", error.getvalue())
+
     def test_launchd_install_dry_run_prints_plist_without_writing(self):
         output = io.StringIO()
         with redirect_stdout(output):
@@ -424,6 +819,8 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertTrue(args.plist_path.exists())
         self.assertIn("<string>--claude-bin</string>", args.plist_path.read_text())
         self.assertIn("<string>/usr/local/bin/claude</string>", args.plist_path.read_text())
+        self.assertIn("<key>EnvironmentVariables</key>", args.plist_path.read_text())
+        self.assertIn("<key>PATH</key>", args.plist_path.read_text())
         self.assertIn("Started com.local.tokenmaxx", output.getvalue())
         self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
 

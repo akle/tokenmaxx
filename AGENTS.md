@@ -60,11 +60,21 @@ packaging, queue behavior, or the daemon model changes.
   and stop after configured attempts.
 - Keep queue state appendable and inspectable. The queue format is JSONL at
   `~/.tokenmaxx/queue.jsonl` by default, and writes must stay protected by the
-  sibling lock file.
+  sibling lock file. Never DELETE queue rows to cancel a session — auto-queue
+  dedupes against rows still present, so deletion re-arms it; `drop` tombstones
+  (status `blocked`, reason "dropped by user") for exactly this reason.
+- Auto-queue decides "limited" only from synthetic assistant records
+  (`"model": "<synthetic>"`) in the transcript, never from raw transcript text —
+  regular messages, tool output, and file contents routinely *mention* limit
+  phrases without the session being limited.
+- `watch` must never resume a session that is still active in a live Claude
+  Code process (busy, or recently updated with an alive pid); it defers instead.
 - Keep daemon behavior explicit. `launchd-install` and `launchd-uninstall`
   remain review-first helpers; `start` and `stop` are the commands that load or
   unload launchd. Launchd plists must record an explicit `--claude-bin` path
-  because launchd does not inherit the interactive shell PATH.
+  AND embed the invoking shell's `PATH` in `EnvironmentVariables`, because
+  launchd starts agents with a bare system PATH and version-manager shims
+  (asdf, mise) exec their manager binary from PATH.
 - Do not add runtime dependencies without a clear packaging reason. The current
   package has no runtime dependencies and should stay easy to install.
 - Do not store secrets in this repo, docs, logs, tests, or `.dwp/`. Claude

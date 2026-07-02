@@ -23,14 +23,27 @@ tokenmaxx/
    `~/.claude/sessions`.
 2. For each recent session, `claude.find_transcript` looks for a matching JSONL
    transcript under `~/.claude/projects`.
-3. `claude.session_hit_limit` reads the transcript tail and asks
-   `queue.classify_output` whether it contains retryable limit output.
+3. `claude.session_hit_limit` walks the transcript tail records from the end and
+   reports a limit only when the last assistant activity is a synthetic limit
+   banner (`message.model == "<synthetic>"`, classified by
+   `queue.classify_output`). Regular messages that merely mention limit phrases
+   never queue a session, and a real assistant record after the banner means the
+   session already resumed.
 4. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
-5. `tokenmaxx watch` processes one due queue item at a time under a queue lock.
-6. `claude.run_due_item` runs `claude --resume <session-id> -p <guarded prompt>`
-   unless the command is a dry run.
-7. `queue.update_item_after_output` records the result and either marks the item
-   `done`, blocks it, or schedules the next attempt.
+5. `tokenmaxx watch` picks one due queue item per cycle. If the session is still
+   active in a live Claude Code process (busy, or updated within the last 30
+   minutes, with an alive pid), the item is deferred by the follow-up delay
+   without consuming an attempt.
+6. Otherwise `watch` writes a lease on the item (its `nextAttemptAt` is pushed
+   past the resume timeout), releases the queue lock, and
+   `claude.run_due_item` runs `claude --resume <session-id> -p <guarded prompt>`
+   outside the lock so `status`, `add`, and `drop` stay usable during a resume.
+   Dry runs stay under the lock and mutate nothing but cosmetic fields.
+7. `queue.update_item_after_output` records the result and
+   `queue.merge_resumed_item` folds it back into a freshly loaded queue; a row
+   resolved mid-resume (for example `tokenmaxx drop`) wins over the resume
+   result. If the process dies mid-resume, the lease expires and the item
+   resurfaces.
 
 ## Queue Model
 
@@ -78,7 +91,10 @@ macOS background operation uses launchd:
 The daemon command is a normal `tokenmaxx watch` invocation with queue, sessions,
 projects, lock timeout, interval, and `--claude-bin` arguments recorded in the
 plist. The Claude executable is resolved at install/start time because launchd
-does not inherit the user's interactive shell PATH.
+does not inherit the user's interactive shell PATH. The invoking shell's `PATH`
+is also embedded in the plist's `EnvironmentVariables`, because version-manager
+shims (asdf, mise) exec their manager binary from PATH and die under launchd's
+bare system PATH otherwise.
 
 ## Failure Boundaries
 

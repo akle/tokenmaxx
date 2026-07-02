@@ -36,6 +36,7 @@ PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py 
 python3 -m tokenmaxx --help
 python3 -m tokenmaxx scan --help
 python3 -m tokenmaxx autoqueue --help
+python3 -m tokenmaxx drop --help
 python3 -m tokenmaxx watch --once --dry-run --no-auto-queue --queue /tmp/tokenmaxx-smoke-queue.jsonl
 python3 -m tokenmaxx start --help
 python3 -m tokenmaxx launchd-install --dry-run --claude-bin /usr/local/bin/claude

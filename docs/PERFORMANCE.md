@@ -22,9 +22,11 @@ and sorts by `updatedAt`. It skips malformed JSON and records without `cwd` or
 
 ### Transcript Tail
 
-`claude.transcript_tail` reads the last 80 lines of a transcript by splitting the
-file. This is simple and acceptable for current transcript sizes. If transcript
-files become very large, replace this with a bounded tail reader and add tests.
+`claude.transcript_tail_records` reads the last 80 lines of a transcript by
+splitting the file and JSON-parses each tail line (skipping non-JSON lines).
+Reading still loads the whole file; parsing is bounded to the tail. This is
+simple and acceptable for current transcript sizes. If transcript files become
+very large, replace the read with a bounded tail reader and add tests.
 
 ### Queue Writes
 

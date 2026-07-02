@@ -13,8 +13,8 @@ Claude Code can do useful long-running work, but sessions sometimes hit usage, r
 `tokenmaxx` turns that into a local queue:
 
 1. Find Claude Code sessions.
-2. Read their transcript tails for limit errors.
-3. Queue only sessions that appear to have run out of credits.
+2. Read their transcripts for Claude limit banners.
+3. Queue only sessions whose last assistant activity is a limit banner.
 4. Resume due sessions later with a prompt that first asks Claude to verify whether work remains.
 5. Back off on limit output and block noisy sessions after repeated attempts.
 
@@ -109,8 +109,19 @@ tokenmaxx watch
 - Queue state lives at `~/.tokenmaxx/queue.jsonl` by default.
 - Queue writes use a sibling lock file: `queue.jsonl.lock`.
 - Auto-queue reads session metadata in `~/.claude/sessions` and transcript tails in `~/.claude/projects`.
-- Auto-queue only queues sessions whose transcript tail contains usage/rate/session/credit limit text.
-- `watch` processes one due item at a time.
+- Auto-queue only queues sessions whose transcript ends on a Claude limit banner
+  (a synthetic assistant record). Sessions that merely *mention* limits in
+  regular messages, tool output, or file contents are not queued.
+- `watch` defers a resume while the session looks active in another Claude Code
+  process — busy, or updated within the last 30 minutes, with an alive pid. A
+  session left idle longer than that is treated as abandoned and will be
+  resumed even if its terminal is still open.
+- `watch` processes one due item at a time, and runs the resume outside the
+  queue lock so `status`, `add`, and `drop` stay usable while a resume is in
+  flight.
+- `drop` stops retries by tombstoning the item (`blocked`, "dropped by user")
+  instead of deleting it, so auto-queue does not silently re-add the session on
+  the next cycle.
 - Limit output is rescheduled with `--retry-delay-seconds`, default 5 hours.
 - Unknown output is rescheduled with `--followup-delay-seconds`, default 15 minutes.
 - Repeated attempts move a session to `blocked`, default after 5 attempts.
@@ -142,8 +153,10 @@ tokenmaxx stop
 ```
 
 `start` and `launchd-install` resolve the current `claude` executable and record
-that absolute path in the launchd plist. If Claude is not on your shell PATH,
-pass it explicitly:
+that absolute path in the launchd plist. They also record your current `PATH`
+in the plist's `EnvironmentVariables`, because launchd starts agents with a bare
+system PATH and version-manager shims (asdf, mise) fail without yours. If Claude
+is not on your shell PATH, pass it explicitly:
 
 ```bash
 tokenmaxx start --claude-bin /absolute/path/to/claude
@@ -186,6 +199,7 @@ tokenmaxx scan
 tokenmaxx autoqueue
 tokenmaxx add --pid <pid>
 tokenmaxx add --session-id <uuid>
+tokenmaxx drop --session-id <uuid>
 tokenmaxx status
 tokenmaxx watch --once --dry-run
 tokenmaxx watch --once

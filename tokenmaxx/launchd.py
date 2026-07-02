@@ -26,6 +26,7 @@ def build_launchd_plist(
     sessions_dir: Path | None = None,
     projects_dir: Path | None = None,
     lock_timeout_seconds: int | None = None,
+    path_env: str | None = None,
 ) -> str:
     arguments = [
         program,
@@ -52,6 +53,10 @@ def build_launchd_plist(
         "StandardErrorPath": str(Path(log_path).expanduser()),
         "RunAtLoad": False,
     }
+    if path_env:
+        # launchd starts agents with a bare system PATH; version-manager shims
+        # (asdf, mise) exec their manager binary and die without the user PATH.
+        payload["EnvironmentVariables"] = {"PATH": path_env}
     return plistlib.dumps(payload, sort_keys=False).decode()
 
 
