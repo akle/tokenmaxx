@@ -5,6 +5,7 @@ import os
 import shlex
 import signal
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from .config import DEFAULT_PROMPT
@@ -65,53 +66,87 @@ def message_text(message: dict) -> str:
     return ""
 
 
-def session_hit_limit(session: dict, projects_dir: Path) -> bool:
-    """True when the session's last assistant activity is a limit banner.
+def record_timestamp(record: dict) -> int:
+    raw = record.get("timestamp")
+    if isinstance(raw, str):
+        try:
+            return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            pass
+    return 0
+
+
+def session_limit_hit_at(session: dict, projects_dir: Path) -> int | None:
+    """Epoch of the limit banner ending the session, or None.
 
     Limit banners arrive as synthetic assistant records (model "<synthetic>").
     Matching only those — instead of raw transcript text — keeps sessions that
     merely *talk about* limits (tool output, file contents) out of the queue,
-    and skips sessions that already resumed past a limit.
+    and skips sessions that already resumed past a limit. A banner without a
+    parseable timestamp reports epoch 0 (queued if new, never re-arms).
     """
     transcript = find_transcript(projects_dir, str(session.get("sessionId")))
     if transcript is None:
-        return False
+        return None
     for record in reversed(transcript_tail_records(transcript)):
         message = record.get("message")
         if record.get("type") != "assistant" or not isinstance(message, dict):
             continue
         if message.get("model") == SYNTHETIC_MODEL:
             if classify_output(message_text(message)) == "limited":
-                return True
+                return record_timestamp(record)
             continue
-        return False
-    return False
+        return None
+    return None
 
 
 def build_limited_queue_items(
     sessions: list[dict],
-    existing_items: list[QueueItem],
+    items: list[QueueItem],
     *,
     projects_dir: Path,
     now: int,
     max_session_age_hours: float,
 ) -> list[QueueItem]:
-    existing_ids = {item.session_id for item in existing_items}
+    """Queue limited sessions, appending new items to `items` in place.
+
+    A session already in the queue is re-armed (reset to pending with fresh
+    attempts) only when its limit banner is NEWER than the row's last update —
+    a new limit event after the row was resolved. A user drop stays dropped.
+    Returns the affected items, new and re-armed.
+    """
+    latest_by_id: dict[str, QueueItem] = {item.session_id: item for item in items}
     max_age_seconds = int(float(max_session_age_hours) * 60 * 60)
-    items: list[QueueItem] = []
+    affected: list[QueueItem] = []
     for session in sessions:
         session_id = str(session.get("sessionId") or "")
-        if not session_id or session_id in existing_ids:
+        if not session_id:
             continue
         updated_at = session_updated_at_seconds(session)
         if updated_at <= 0 or now - updated_at > max_age_seconds:
             continue
-        if not session_hit_limit(session, projects_dir):
+        existing = latest_by_id.get(session_id)
+        if existing is not None and (existing.status == "pending" or existing.blocked_reason == "dropped by user"):
             continue
-        item = QueueItem(cwd=str(session["cwd"]), session_id=session_id)
-        items.append(item)
-        existing_ids.add(session_id)
-    return items
+        hit_at = session_limit_hit_at(session, projects_dir)
+        if hit_at is None:
+            continue
+        if existing is None:
+            item = QueueItem(cwd=str(session["cwd"]), session_id=session_id)
+            items.append(item)
+            latest_by_id[session_id] = item
+            affected.append(item)
+            continue
+        if hit_at <= existing.updated_at:
+            continue
+        existing.status = "pending"
+        existing.attempts = 0
+        existing.next_attempt_at = 0
+        existing.blocked_reason = ""
+        existing.last_output = ""
+        existing.updated_at = now
+        affected.append(existing)
+    return affected
 
 
 def pid_alive(pid) -> bool:

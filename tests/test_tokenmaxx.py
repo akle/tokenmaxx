@@ -27,13 +27,14 @@ from tokenmaxx.queue import (
 DEAD_PID = 4_190_000  # above macOS/Linux default pid ranges, never a live process
 
 
-def synthetic_line(text):
-    return json.dumps(
-        {
-            "type": "assistant",
-            "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": text}]},
-        }
-    ) + "\n"
+def synthetic_line(text, timestamp=None):
+    record = {
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "role": "assistant", "content": [{"type": "text", "text": text}]},
+    }
+    if timestamp is not None:
+        record["timestamp"] = timestamp
+    return json.dumps(record) + "\n"
 
 
 def assistant_line(text):
@@ -116,6 +117,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(classify_output("ran out of credits"), "limited")
         self.assertEqual(classify_output("Server is temporarily limiting requests"), "limited")
         self.assertEqual(classify_output("You've hit your limit · resets 7pm (America/Mexico_City)"), "limited")
+        self.assertEqual(classify_output("You're out of usage credits. Run /usage-credits to keep using Fable 5 or /model to switch."), "limited")
         self.assertEqual(classify_output("DONE"), "done")
         self.assertEqual(classify_output("**DONE.** The work is complete."), "done")
         self.assertEqual(classify_output("DONE. Resumed after the usage limit reset and finished."), "done")
@@ -332,6 +334,66 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Auto-queued 1 session", output.getvalue())
         self.assertEqual([item.session_id for item in load_queue(self.queue_path)], ["already", "limited"])
+
+    def rearm_fixture(self, existing_status, existing_updated_at, banner_timestamp, blocked_reason=""):
+        append_queue_item(
+            self.queue_path,
+            QueueItem(
+                cwd="/tmp/repo",
+                session_id="abc",
+                status=existing_status,
+                attempts=5,
+                blocked_reason=blocked_reason,
+                updated_at=existing_updated_at,
+            ),
+        )
+        self.write_session(
+            "abc.json",
+            {"pid": 1, "status": "idle", "cwd": "/tmp/repo", "sessionId": "abc", "updatedAt": 999_000},
+        )
+        self.write_transcript(
+            "abc",
+            synthetic_line("You're out of usage credits. Run /usage-credits to keep going.", timestamp=banner_timestamp),
+        )
+
+    def test_autoqueue_rearms_blocked_item_on_newer_limit_banner(self):
+        self.rearm_fixture("blocked", 500, "1970-01-01T00:13:20Z", blocked_reason="max attempts (5) reached")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 1 session", output.getvalue())
+        items = load_queue(self.queue_path)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status, "pending")
+        self.assertEqual(items[0].attempts, 0)
+        self.assertEqual(items[0].blocked_reason, "")
+
+    def test_autoqueue_never_rearms_user_dropped_item(self):
+        self.rearm_fixture("blocked", 500, "1970-01-01T00:13:20Z", blocked_reason="dropped by user")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 0 sessions", output.getvalue())
+        items = load_queue(self.queue_path)
+        self.assertEqual(items[0].status, "blocked")
+        self.assertEqual(items[0].blocked_reason, "dropped by user")
+
+    def test_autoqueue_ignores_banner_older_than_queue_row(self):
+        self.rearm_fixture("blocked", 900, "1970-01-01T00:10:00Z", blocked_reason="max attempts (5) reached")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 0 sessions", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].status, "blocked")
 
     def test_autoqueue_ignores_limit_text_in_regular_messages(self):
         self.write_session(

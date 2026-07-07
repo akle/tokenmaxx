@@ -112,6 +112,9 @@ tokenmaxx watch
 - Auto-queue only queues sessions whose transcript ends on a Claude limit banner
   (a synthetic assistant record). Sessions that merely *mention* limits in
   regular messages, tool output, or file contents are not queued.
+- A session whose queue row is already `done` or `blocked` is re-armed with
+  fresh attempts when it hits a *new* limit (banner newer than the row).
+  Sessions you `drop` are never re-armed.
 - `watch` defers a resume while the session looks active in another Claude Code
   process — busy, or updated within the last 30 minutes, with an alive pid. A
   session left idle longer than that is treated as abandoned and will be

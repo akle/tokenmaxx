@@ -66,7 +66,10 @@ packaging, queue behavior, or the daemon model changes.
 - Auto-queue decides "limited" only from synthetic assistant records
   (`"model": "<synthetic>"`) in the transcript, never from raw transcript text —
   regular messages, tool output, and file contents routinely *mention* limit
-  phrases without the session being limited.
+  phrases without the session being limited. When Claude ships a new limit
+  banner wording, add it to `LIMIT_MARKERS` with a test using the exact text.
+- Existing `done`/`blocked` rows re-arm only on a limit banner NEWER than the
+  row's `updatedAt`; rows with `blocked_reason` "dropped by user" never re-arm.
 - `watch` must never resume a session that is still active in a live Claude
   Code process (busy, or recently updated with an alive pid); it defers instead.
 - Keep daemon behavior explicit. `launchd-install` and `launchd-uninstall`

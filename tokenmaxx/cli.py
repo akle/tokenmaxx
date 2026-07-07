@@ -132,16 +132,13 @@ def print_daemon_state(args) -> None:
 
 
 def autoqueue_limited_sessions(args, items: list[QueueItem], now: int, sessions: list[dict]) -> list[QueueItem]:
-    queued = build_limited_queue_items(
+    return build_limited_queue_items(
         sessions,
         items,
         projects_dir=args.projects_dir,
         now=now,
         max_session_age_hours=args.max_session_age_hours,
     )
-    if queued:
-        items.extend(queued)
-    return queued
 
 
 def autoqueued_message(count: int) -> str:

@@ -23,13 +23,18 @@ tokenmaxx/
    `~/.claude/sessions`.
 2. For each recent session, `claude.find_transcript` looks for a matching JSONL
    transcript under `~/.claude/projects`.
-3. `claude.session_hit_limit` walks the transcript tail records from the end and
-   reports a limit only when the last assistant activity is a synthetic limit
-   banner (`message.model == "<synthetic>"`, classified by
-   `queue.classify_output`). Regular messages that merely mention limit phrases
-   never queue a session, and a real assistant record after the banner means the
-   session already resumed.
+3. `claude.session_limit_hit_at` walks the transcript tail records from the end
+   and reports a limit (with the banner's timestamp) only when the last
+   assistant activity is a synthetic limit banner
+   (`message.model == "<synthetic>"`, classified by `queue.classify_output`).
+   Regular messages that merely mention limit phrases never queue a session,
+   and a real assistant record after the banner means the session already
+   resumed.
 4. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
+   A session with an existing `done`/`blocked` row is re-armed (pending, fresh
+   attempts) when its banner is newer than the row's last update — a new limit
+   event after the row was resolved. Rows dropped by the user are never
+   re-armed.
 5. `tokenmaxx watch` picks one due queue item per cycle. If the session is still
    active in a live Claude Code process (busy, or updated within the last 30
    minutes, with an alive pid), the item is deferred by the follow-up delay

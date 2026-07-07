@@ -19,6 +19,7 @@ LIMIT_MARKERS = (
     "usage limit",
     "credit limit",
     "out of credits",
+    "out of usage credits",
     "ran out of credits",
     "rate limit",
     "rate limited",
