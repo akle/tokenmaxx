@@ -495,6 +495,16 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(result.next_attempt_at, 1900)
         self.assertIn("timed out after 5 seconds", result.last_output)
 
+    def test_watch_loop_logs_startup_line(self):
+        # once=False with an immediate-return side effect via sleep patch
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc", status="done"))
+        output = io.StringIO()
+        with patch("tokenmaxx.cli.time.sleep", side_effect=KeyboardInterrupt), redirect_stdout(output):
+            with self.assertRaises(KeyboardInterrupt):
+                cli.cmd_watch(self.args(dry_run=True, once=False))
+        self.assertIn("tokenmaxx", output.getvalue())
+        self.assertIn("watching", output.getvalue())
+
     def test_watch_dry_run_prints_generated_command(self):
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
         output = io.StringIO()

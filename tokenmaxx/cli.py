@@ -196,6 +196,10 @@ def run_resume(args, item: QueueItem, now: int) -> QueueItem:
 
 
 def cmd_watch(args) -> int:
+    if not args.once:
+        # One line per daemon start so the log always answers "is it running,
+        # and which build" even when no queue events ever fire.
+        log_line(f"tokenmaxx {__version__} watching {args.queue} every {args.sleep_seconds}s")
     while True:
         now = int(args.now or time.time())
         resume_item = None
