@@ -103,17 +103,76 @@ def cmd_add(args) -> int:
     return 0
 
 
+def display_path(path) -> str:
+    text = str(path)
+    home = str(Path.home())
+    if text.startswith(home + "/") or text == home:
+        return "~" + text[len(home):]
+    return text
+
+
+def truncate_left(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return "…" + text[-(width - 1):]
+
+
+def truncate_right(text: str, width: int) -> str:
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
+
+STATUS_ORDER = {"pending": 0, "blocked": 1, "done": 2}
+
+
 def summarize_queue(items: list[QueueItem], queue: Path) -> None:
     counts: dict[str, int] = {}
     for item in items:
         counts[item.status] = counts.get(item.status, 0) + 1
-    print(f"Queue: {queue}")
-    print(f"pending={counts.get('pending', 0)} done={counts.get('done', 0)} blocked={counts.get('blocked', 0)} total={len(items)}")
-    for item in items:
-        due = "due" if is_due(item) else f"next={format_time(item.next_attempt_at)}"
+    print(f"Queue:  {display_path(queue)}")
+    print(
+        f"{counts.get('pending', 0)} pending · {counts.get('done', 0)} done · "
+        f"{counts.get('blocked', 0)} blocked · {len(items)} total"
+    )
+    if not items:
+        return
+    print()
+
+    # Pending first (soonest attempt on top), then blocked, then done.
+    rows = sorted(
+        items,
+        key=lambda item: (
+            STATUS_ORDER.get(item.status, 3),
+            item.next_attempt_at if item.status == "pending" else 0,
+            -item.updated_at,
+        ),
+    )
+    directories = [truncate_left(display_path(item.cwd), 36) for item in rows]
+    dir_width = max(len(text) for text in directories + ["DIRECTORY"])
+    template = f"{{:<8}} {{:>3}}  {{:<16}}  {{:<8}}  {{:<{dir_width}}}  {{}}"
+    term_width = shutil.get_terminal_size(fallback=(120, 24)).columns
+    last_width = max(20, term_width - (8 + 1 + 3 + 2 + 16 + 2 + 8 + 2 + dir_width + 2))
+
+    print(template.format("STATUS", "ATT", "NEXT", "SESSION", "DIRECTORY", "LAST"))
+    for item, directory in zip(rows, directories):
+        if is_due(item):
+            next_attempt = "due now"
+        elif item.next_attempt_at:
+            next_attempt = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.next_attempt_at))
+        else:
+            next_attempt = "-"
         detail = item.blocked_reason or one_line(item.last_output)
-        suffix = f" last={detail}" if detail else ""
-        print(f"{item.status:<8} attempts={item.attempts:<3} {due:<24} {item.cwd} {item.session_id}{suffix}")
+        print(
+            template.format(
+                item.status,
+                item.attempts,
+                next_attempt,
+                item.session_id[:8],
+                directory,
+                truncate_right(detail, last_width),
+            )
+        )
 
 
 def cmd_status(args) -> int:
@@ -127,8 +186,8 @@ def print_daemon_state(args) -> None:
     loaded = "unknown" if state.loaded is None else ("loaded" if state.loaded else "not loaded")
     installed = "installed" if state.installed else "not installed"
     print(f"Daemon: {loaded} ({installed})")
-    print(f"Plist: {args.plist_path}")
-    print(f"Log: {args.log_path}")
+    print(f"Plist:  {args.plist_path}")
+    print(f"Log:    {args.log_path}")
 
 
 def autoqueue_limited_sessions(args, items: list[QueueItem], now: int, sessions: list[dict]) -> list[QueueItem]:
@@ -166,19 +225,22 @@ def cmd_drop(args) -> int:
     now = int(time.time())
     with queue_lock(args.queue, args.lock_timeout_seconds):
         items = load_queue(args.queue)
-        dropped = False
+        matches = sorted({item.session_id for item in items if item.session_id.startswith(args.session_id)})
+        if not matches:
+            print(f"No queued item for session {args.session_id}.", file=sys.stderr)
+            return 1
+        if len(matches) > 1:
+            print(f"Ambiguous session prefix {args.session_id}: matches {', '.join(matches)}.", file=sys.stderr)
+            return 1
+        session_id = matches[0]
         for item in items:
-            if item.session_id == args.session_id:
+            if item.session_id == session_id:
                 item.status = "blocked"
                 item.blocked_reason = "dropped by user"
                 item.next_attempt_at = 0
                 item.updated_at = now
-                dropped = True
-        if not dropped:
-            print(f"No queued item for session {args.session_id}.", file=sys.stderr)
-            return 1
         write_queue(args.queue, items)
-    print(f"Dropped {args.session_id}. Kept as a blocked tombstone so auto-queue will not re-add it.")
+    print(f"Dropped {session_id}. Kept as a blocked tombstone so auto-queue will not re-add it.")
     return 0
 
 
@@ -235,7 +297,7 @@ def cmd_watch(args) -> int:
                     items[index] = run_resume(args, item, now)
                     dirty = True
                     if items[index].last_output:
-                        log_line(items[index].last_output)
+                        log_line(f"{item.session_id[:8]}: {items[index].last_output}")
                     processed = True
                     break
                 # Claim with a lease and resume OUTSIDE the lock, so status,
@@ -254,7 +316,7 @@ def cmd_watch(args) -> int:
         if resume_item is not None:
             updated = run_resume(args, resume_item, now)
             if updated.last_output:
-                log_line(updated.last_output)
+                log_line(f"{updated.session_id[:8]}: {updated.last_output}")
             with queue_lock(args.queue, args.lock_timeout_seconds):
                 items = load_queue(args.queue)
                 merge_resumed_item(items, updated)

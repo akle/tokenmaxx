@@ -254,6 +254,15 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(not_retryable.status, "blocked")
         self.assertIn("not retryable", not_retryable.blocked_reason)
 
+    def test_load_claude_sessions_skips_file_deleted_mid_scan(self):
+        # Claude Code deletes session files on exit; a dangling symlink
+        # reproduces "globbed, then gone at read time".
+        (self.sessions_dir / "ghost.json").symlink_to(self.sessions_dir / "does-not-exist.json")
+        self.write_session("80544.json", {"pid": 80544, "status": "idle", "cwd": "/tmp/repo", "sessionId": "abc"})
+
+        sessions = claude.load_claude_sessions(self.sessions_dir)
+        self.assertEqual([s["sessionId"] for s in sessions], ["abc"])
+
     def test_load_claude_sessions_reads_metadata(self):
         self.write_session(
             "80544.json",
@@ -667,23 +676,95 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("Auto-queued 1 session", output.getvalue())
         self.assertIn("DRY RUN: claude --resume limited", output.getvalue())
 
-    def test_status_prints_next_attempt_and_last_output(self):
-        item = QueueItem(
-            cwd="/tmp/repo",
-            session_id="abc",
-            status="pending",
-            next_attempt_at=9_999_999_999,
-            attempts=1,
-            last_output="usage limit reached",
+    def test_status_prints_columnar_queue_table(self):
+        append_queue_item(
+            self.queue_path,
+            QueueItem(
+                cwd=str(Path.home() / "dev" / "repo"),
+                session_id="abcdef12-3456-7890-abcd-ef1234567890",
+                status="pending",
+                next_attempt_at=9_999_999_999,
+                attempts=1,
+                last_output="usage limit reached",
+            ),
         )
-        append_queue_item(self.queue_path, item)
+        append_queue_item(
+            self.queue_path,
+            QueueItem(
+                cwd="/tmp/other",
+                session_id="99999999-aaaa-bbbb-cccc-dddddddddddd",
+                status="blocked",
+                attempts=5,
+                blocked_reason="max attempts (5) reached after unknown output",
+            ),
+        )
+
         output = io.StringIO()
         with redirect_stdout(output):
             cli.cmd_status(self.args())
         rendered = output.getvalue()
-        self.assertIn("attempts=1", rendered)
-        self.assertIn("last=usage limit reached", rendered)
-        self.assertIn("next=", rendered)
+
+        self.assertIn("1 pending", rendered)
+        self.assertIn("1 blocked", rendered)
+        self.assertIn("2 total", rendered)
+        header, pending_row, blocked_row = [
+            line for line in rendered.splitlines() if line.startswith(("STATUS", "pending", "blocked"))
+        ]
+        self.assertRegex(header, r"STATUS\s+ATT\s+NEXT\s+SESSION\s+DIRECTORY\s+LAST")
+        self.assertIn("abcdef12", pending_row)
+        self.assertNotIn("abcdef12-3456", pending_row)
+        self.assertIn("~/dev/repo", pending_row)
+        self.assertIn("usage limit reached", pending_row)
+        self.assertIn("max attempts (5)", blocked_row)
+        # columns align: SESSION starts at the same offset in every row
+        offset = header.index("SESSION")
+        self.assertEqual(pending_row[offset : offset + 8], "abcdef12")
+        self.assertEqual(blocked_row[offset : offset + 8], "99999999")
+
+    def test_status_orders_pending_before_blocked_and_done(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/r", session_id="done-item", status="done"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/r", session_id="blocked-item", status="blocked"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/r", session_id="pending-item", status="pending"))
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cli.cmd_status(self.args())
+        lines = [line.split()[0] for line in output.getvalue().splitlines() if line.startswith(("pending", "blocked", "done"))]
+        self.assertEqual(lines, ["pending", "blocked", "done"])
+
+    def test_status_marks_due_items(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/r", session_id="due-item", status="pending", next_attempt_at=1))
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cli.cmd_status(self.args())
+        self.assertIn("due now", output.getvalue())
+
+    def test_drop_accepts_unique_session_prefix(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abcdef12-3456-7890-abcd-ef1234567890"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="99999999-aaaa-bbbb-cccc-dddddddddddd"))
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_drop(self.args(session_id="abcdef12"))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Dropped abcdef12-3456-7890-abcd-ef1234567890", output.getvalue())
+        by_id = {item.session_id[:8]: item for item in load_queue(self.queue_path)}
+        self.assertEqual(by_id["abcdef12"].status, "blocked")
+        self.assertEqual(by_id["99999999"].status, "pending")
+
+    def test_drop_rejects_ambiguous_prefix(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc-one"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc-two"))
+
+        error = io.StringIO()
+        with redirect_stderr(error):
+            code = cli.cmd_drop(self.args(session_id="abc"))
+
+        self.assertEqual(code, 1)
+        self.assertIn("Ambiguous", error.getvalue())
+        self.assertEqual({item.status for item in load_queue(self.queue_path)}, {"pending"})
 
     def test_status_prints_daemon_state(self):
         self.args().plist_path.write_text("<plist/>")

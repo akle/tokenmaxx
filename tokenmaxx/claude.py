@@ -20,6 +20,10 @@ def load_claude_sessions(sessions_dir: Path) -> list[dict]:
     for path in sessions_dir.glob("*.json"):
         try:
             data = json.loads(path.read_text())
+        except FileNotFoundError:
+            # Claude Code deletes session files on exit; this one vanished
+            # between the glob and the read.
+            continue
         except json.JSONDecodeError:
             continue
         if not data.get("sessionId") or not data.get("cwd"):

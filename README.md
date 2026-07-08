@@ -202,7 +202,7 @@ tokenmaxx scan
 tokenmaxx autoqueue
 tokenmaxx add --pid <pid>
 tokenmaxx add --session-id <uuid>
-tokenmaxx drop --session-id <uuid>
+tokenmaxx drop --session-id <uuid-or-unique-prefix>
 tokenmaxx status
 tokenmaxx watch --once --dry-run
 tokenmaxx watch --once
