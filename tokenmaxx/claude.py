@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import DEFAULT_PROMPT
-from .queue import QueueItem, classify_output, is_due, update_item_after_output
+from .queue import QueueItem, apply_limit_event, classify_output, is_due, update_item_after_output
 
 
 def load_claude_sessions(sessions_dir: Path) -> list[dict]:
@@ -119,7 +119,6 @@ def build_limited_queue_items(
     a new limit event after the row was resolved. A user drop stays dropped.
     Returns the affected items, new and re-armed.
     """
-    latest_by_id: dict[str, QueueItem] = {item.session_id: item for item in items}
     max_age_seconds = int(float(max_session_age_hours) * 60 * 60)
     affected: list[QueueItem] = []
     for session in sessions:
@@ -129,27 +128,19 @@ def build_limited_queue_items(
         updated_at = session_updated_at_seconds(session)
         if updated_at <= 0 or now - updated_at > max_age_seconds:
             continue
-        existing = latest_by_id.get(session_id)
-        if existing is not None and (existing.status == "pending" or existing.blocked_reason == "dropped by user"):
-            continue
         hit_at = session_limit_hit_at(session, projects_dir)
         if hit_at is None:
             continue
-        if existing is None:
-            item = QueueItem(cwd=str(session["cwd"]), session_id=session_id)
-            items.append(item)
-            latest_by_id[session_id] = item
+        item = apply_limit_event(
+            items,
+            provider="claude",
+            session_id=session_id,
+            cwd=str(session["cwd"]),
+            hit_at=hit_at,
+            now=now,
+        )
+        if item is not None:
             affected.append(item)
-            continue
-        if hit_at <= existing.updated_at:
-            continue
-        existing.status = "pending"
-        existing.attempts = 0
-        existing.next_attempt_at = 0
-        existing.blocked_reason = ""
-        existing.last_output = ""
-        existing.updated_at = now
-        affected.append(existing)
     return affected
 
 

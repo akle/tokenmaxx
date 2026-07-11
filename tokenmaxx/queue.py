@@ -43,12 +43,14 @@ TEMPORARY_LIMIT_MARKERS = (
 )
 
 RESET_BUFFER_SECONDS = 60
+SUPPORTED_PROVIDERS = ("claude", "codex")
 
 
 @dataclass
 class QueueItem:
     cwd: str
     session_id: str
+    provider: str = "claude"
     status: str = "pending"
     next_attempt_at: int = 0
     attempts: int = 0
@@ -58,6 +60,8 @@ class QueueItem:
     updated_at: int = 0
 
     def __post_init__(self) -> None:
+        if self.provider not in SUPPORTED_PROVIDERS:
+            raise ValueError(f"unsupported provider: {self.provider}")
         now = int(time.time())
         self.next_attempt_at = int(self.next_attempt_at or 0)
         self.attempts = int(self.attempts or 0)
@@ -69,6 +73,7 @@ class QueueItem:
         return cls(
             cwd=str(data["cwd"]),
             session_id=str(data.get("sessionId") or data.get("session_id")),
+            provider=str(data.get("provider", "claude")),
             status=str(data.get("status", "pending")),
             next_attempt_at=int(data.get("nextAttemptAt") or data.get("next_attempt_at") or 0),
             attempts=int(data.get("attempts", 0)),
@@ -82,6 +87,7 @@ class QueueItem:
         return {
             "cwd": self.cwd,
             "sessionId": self.session_id,
+            "provider": self.provider,
             "status": self.status,
             "nextAttemptAt": self.next_attempt_at,
             "attempts": self.attempts,
@@ -90,6 +96,10 @@ class QueueItem:
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.provider, self.session_id
 
 
 def classify_output(text: str) -> str:
@@ -247,16 +257,47 @@ def defer_item(item: QueueItem, now: int, delay_seconds: int, reason: str) -> Qu
 def merge_resumed_item(items: list[QueueItem], updated: QueueItem) -> None:
     """Fold the result of an out-of-lock resume back into a reloaded queue.
 
-    The result lands on the first still-pending row for the session — the row
-    that carried the lease. Matching by session id alone would hit a blocked
-    tombstone when the session was re-added after a drop. No pending row means
-    the item was resolved mid-resume (dropped, or deleted manually); that
-    decision wins and the resume result is discarded.
+    The result lands on the first still-pending row for the provider/session — the row
+    that carried the lease. Provider/session matching keeps identically named
+    sessions isolated, while still skipping a blocked tombstone when the same
+    provider session was re-added after a drop. No pending row means the item
+    was resolved mid-resume (dropped, or deleted manually); that decision wins
+    and the resume result is discarded.
     """
     for index, existing in enumerate(items):
-        if existing.session_id == updated.session_id and existing.status == "pending":
+        if existing.key == updated.key and existing.status == "pending":
             items[index] = updated
             return
+
+
+def apply_limit_event(
+    items: list[QueueItem],
+    *,
+    provider: str,
+    session_id: str,
+    cwd: str,
+    hit_at: int,
+    now: int,
+) -> QueueItem | None:
+    key = (provider, session_id)
+    existing = next((item for item in reversed(items) if item.key == key), None)
+    if existing is not None and (
+        existing.status == "pending" or existing.blocked_reason == "dropped by user"
+    ):
+        return None
+    if existing is None:
+        item = QueueItem(cwd=cwd, session_id=session_id, provider=provider)
+        items.append(item)
+        return item
+    if hit_at <= existing.updated_at:
+        return None
+    existing.status = "pending"
+    existing.attempts = 0
+    existing.next_attempt_at = 0
+    existing.blocked_reason = ""
+    existing.last_output = ""
+    existing.updated_at = now
+    return existing
 
 
 def truncate_output(text: str, max_chars: int = 2000) -> str:

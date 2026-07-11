@@ -112,6 +112,27 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertTrue(is_due(loaded[0], now=200))
         self.assertEqual(queue_lock_path(self.queue_path), self.root / "queue.jsonl.lock")
 
+    def test_queue_provider_migration_and_composite_identity(self):
+        self.queue_path.write_text('{"cwd":"/tmp/r","sessionId":"same"}\n')
+        legacy = load_queue(self.queue_path)[0]
+        self.assertEqual(legacy.provider, "claude")
+        self.assertEqual(legacy.key, ("claude", "same"))
+
+        rows = [
+            QueueItem(cwd="/tmp/r", session_id="same", provider="codex"),
+            QueueItem(cwd="/tmp/r", session_id="same", provider="claude"),
+        ]
+        self.assertEqual(rows[0].to_dict()["provider"], "codex")
+        merge_resumed_item(
+            rows,
+            QueueItem(cwd="/tmp/r", session_id="same", provider="claude", status="done"),
+        )
+        self.assertEqual([row.status for row in rows], ["pending", "done"])
+
+        self.queue_path.write_text('{"cwd":"/tmp/r","sessionId":"x","provider":"other"}\n')
+        with self.assertRaisesRegex(ValueError, "unsupported provider"):
+            load_queue(self.queue_path)
+
     def test_classify_output_and_retry_updates(self):
         self.assertEqual(classify_output("usage limit reached"), "limited")
         self.assertEqual(classify_output("ran out of credits"), "limited")
