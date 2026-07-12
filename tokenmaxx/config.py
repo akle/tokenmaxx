@@ -33,6 +33,10 @@ def default_sessions_dir() -> Path:
     return Path.home() / ".claude" / "sessions"
 
 
+def default_codex_sessions_dir() -> Path:
+    return Path.home() / ".codex" / "sessions"
+
+
 def default_projects_dir() -> Path:
     return Path.home() / ".claude" / "projects"
 

@@ -5,11 +5,11 @@ import os
 import shlex
 import signal
 import subprocess
-from datetime import datetime
 from pathlib import Path
 
 from .config import DEFAULT_PROMPT
 from .queue import QueueItem, apply_limit_event, classify_output, is_due, update_item_after_output
+from .transcript import record_timestamp, tail_records as transcript_tail_records
 
 
 def load_claude_sessions(sessions_dir: Path) -> list[dict]:
@@ -46,21 +46,6 @@ def find_transcript(projects_dir: Path, session_id: str) -> Path | None:
 SYNTHETIC_MODEL = "<synthetic>"
 
 
-def transcript_tail_records(path: Path, max_lines: int = 80) -> list[dict]:
-    records: list[dict] = []
-    for line in path.read_text(errors="replace").splitlines()[-max_lines:]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            record = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
-
-
 def message_text(message: dict) -> str:
     content = message.get("content")
     if isinstance(content, str):
@@ -68,16 +53,6 @@ def message_text(message: dict) -> str:
     if isinstance(content, list):
         return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
     return ""
-
-
-def record_timestamp(record: dict) -> int:
-    raw = record.get("timestamp")
-    if isinstance(raw, str):
-        try:
-            return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
-        except ValueError:
-            pass
-    return 0
 
 
 def session_limit_hit_at(session: dict, projects_dir: Path) -> int | None:
