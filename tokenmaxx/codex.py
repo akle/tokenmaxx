@@ -23,15 +23,21 @@ def load_codex_sessions(
             with path.open() as handle:
                 for line in handle:
                     record = json.loads(line)
+                    if not isinstance(record, dict):
+                        continue
                     if record.get("type") != "session_meta":
                         continue
                     payload = record.get("payload")
-                    if not isinstance(payload, dict) or not payload.get("id") or not payload.get("cwd"):
+                    if not isinstance(payload, dict):
+                        break
+                    session_id = payload.get("id")
+                    cwd = payload.get("cwd")
+                    if not isinstance(session_id, str) or not session_id or not isinstance(cwd, str) or not cwd:
                         break
                     sessions.append(
                         {
-                            "sessionId": payload["id"],
-                            "cwd": payload["cwd"],
+                            "sessionId": session_id,
+                            "cwd": cwd,
                             "updatedAt": int(updated_at * 1000),
                             "_path": str(path),
                         }
