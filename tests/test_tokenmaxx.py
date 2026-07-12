@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
-from tokenmaxx import claude, cli, launchd, runner
+from tokenmaxx import claude, cli, launchd, queue as queue_module, runner
 from tokenmaxx.queue import (
     QueueItem,
     append_queue_item,
@@ -652,6 +652,55 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("claude --resume claude-session", output.getvalue())
         self.assertNotIn("codex exec resume", output.getvalue())
 
+    def test_watch_fails_immediately_when_no_provider_executable_resolves(self):
+        for once in (True, False):
+            with self.subTest(once=once):
+                args = self.args(once=once, auto_queue=False)
+                output = io.StringIO()
+                error = io.StringIO()
+
+                def stop_foreground_loop(_seconds):
+                    args.once = True
+
+                with patch("tokenmaxx.cli.shutil.which", return_value=None), patch(
+                    "tokenmaxx.cli.time.sleep", side_effect=stop_foreground_loop
+                ) as sleep, redirect_stdout(output), redirect_stderr(error):
+                    code = cli.cmd_watch(args)
+
+                self.assertNotEqual(code, 0)
+                self.assertIn("Claude or Codex executable", error.getvalue())
+                self.assertNotIn("No due items", output.getvalue())
+                sleep.assert_not_called()
+
+    def test_resume_lock_is_nonblocking_and_released(self):
+        lock = getattr(queue_module, "resume_lock", None)
+        self.assertIsNotNone(lock, "queue.resume_lock must exist")
+
+        with lock(self.queue_path) as acquired:
+            self.assertTrue(acquired)
+            with lock(self.queue_path) as contended:
+                self.assertFalse(contended)
+
+        with lock(self.queue_path) as acquired_after_release:
+            self.assertTrue(acquired_after_release)
+
+    def test_watch_skips_due_provider_item_while_resume_lock_is_held(self):
+        item = QueueItem(cwd="/tmp/codex", session_id="codex-session", provider="codex")
+        append_queue_item(self.queue_path, item)
+        output = io.StringIO()
+
+        with queue_module.resume_lock(self.queue_path) as acquired:
+            self.assertTrue(acquired)
+            with patch("tokenmaxx.cli.shutil.which", side_effect=lambda name: name), patch(
+                "tokenmaxx.cli.codex.run_due_item"
+            ) as run_due_item, redirect_stdout(output):
+                code = cli.cmd_watch(self.args(dry_run=False, auto_queue=False))
+
+        self.assertEqual(code, 0)
+        run_due_item.assert_not_called()
+        self.assertTrue(is_due(load_queue(self.queue_path)[0], now=1000))
+        self.assertIn("resume already in progress", output.getvalue().lower())
+
     def test_resolve_provider_bin_rejects_missing_absolute_path(self):
         missing = self.root / "missing-codex"
         self.assertIsNone(cli.resolve_provider_bin("codex", str(missing)))
@@ -1063,7 +1112,10 @@ class TokenmaxxTests(unittest.TestCase):
 
         def fake_run(item, **kwargs):
             observed["item"] = item
-            observed["queue_at_resume"] = load_queue(self.queue_path)
+            with queue_module.resume_lock(self.queue_path) as resume_lock_acquired:
+                observed["resume_lock_acquired"] = resume_lock_acquired
+            with queue_module.queue_lock(self.queue_path, timeout_seconds=0):
+                observed["queue_at_resume"] = load_queue(self.queue_path)
             return updated
 
         output = io.StringIO()
@@ -1072,6 +1124,7 @@ class TokenmaxxTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertTrue(is_due(observed["item"], now))
+        self.assertFalse(observed["resume_lock_acquired"])
         lease_row = observed["queue_at_resume"][0]
         self.assertEqual(lease_row.status, "pending")
         self.assertGreater(lease_row.next_attempt_at, now + 7_200)

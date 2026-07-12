@@ -187,6 +187,30 @@ def queue_lock_path(queue: Path) -> Path:
     return queue.with_name(queue.name + ".lock")
 
 
+def resume_lock_path(queue: Path) -> Path:
+    queue = Path(queue).expanduser()
+    return queue.with_name(queue.name + ".resume.lock")
+
+
+@contextmanager
+def resume_lock(queue: Path):
+    lock_path = resume_lock_path(queue)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as handle:
+        if fcntl is None:
+            yield True
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 @contextmanager
 def queue_lock(queue: Path, timeout_seconds: int = 10):
     lock_path = queue_lock_path(queue)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 import dataclasses
 import os
 import shutil
@@ -41,6 +42,7 @@ from .queue import (
     merge_resumed_item,
     one_line,
     queue_lock,
+    resume_lock,
     write_queue,
 )
 
@@ -330,83 +332,99 @@ def find_active_provider_session(args, item: QueueItem, now: int) -> dict | None
     raise ValueError(f"unsupported provider: {item.provider}")
 
 
+def run_watch_cycle(args, bins: dict[str, str]) -> bool:
+    now = int(args.now or time.time())
+    resume_item = None
+    processed = False
+    with queue_lock(args.queue, args.lock_timeout_seconds):
+        items = load_queue(args.queue)
+        dirty = False
+        if args.auto_queue:
+            queued = []
+            for provider in bins:
+                sessions = load_provider_sessions(args, provider, now)
+                queued.extend(autoqueue_limited_sessions(args, items, now, sessions, provider))
+            if queued:
+                dirty = True
+                log_line(autoqueued_message(len(queued)))
+        for index, item in enumerate(items):
+            if not is_due(item, now):
+                continue
+            identity = f"{item.provider}:{item.session_id[:8]}"
+            if item.provider not in bins:
+                reason = f"{item.provider} executable unavailable"
+                if args.dry_run:
+                    log_line(f"Would defer {identity}: {reason}.")
+                else:
+                    items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
+                    dirty = True
+                    log_line(f"Deferred {identity}: {reason}.")
+                continue
+            # Fresh session snapshot per due item: the auto-queue transcript
+            # scan above can take seconds, and the guard should act on data
+            # milliseconds old. The residual check-to-resume window is
+            # irreducible in a poll-based design.
+            owner = find_active_provider_session(args, item, now)
+            if owner is not None:
+                pid = owner.get("pid")
+                reason = f"session active in pid {pid}" if pid is not None else "session active"
+                if args.dry_run:
+                    log_line(f"Would defer {identity}: {reason}.")
+                else:
+                    items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
+                    dirty = True
+                    log_line(f"Deferred {identity}: {reason}.")
+                continue
+            if args.dry_run:
+                items[index] = run_resume(args, item, now, bins)
+                dirty = True
+                if items[index].last_output:
+                    log_line(f"{identity}: {items[index].last_output}")
+                processed = True
+                break
+            # Claim with a lease and resume OUTSIDE the queue lock, so status,
+            # add, and drop stay usable during a resume that can run for hours.
+            # The queue-scoped resume lock still prevents another watcher from
+            # claiming a different provider row concurrently.
+            resume_item = dataclasses.replace(item)
+            lease_seconds = args.resume_timeout_seconds if args.resume_timeout_seconds > 0 else 86_400
+            item.next_attempt_at = now + lease_seconds + 300
+            item.updated_at = now
+            dirty = True
+            processed = True
+            break
+        if dirty:
+            write_queue(args.queue, items)
+    if resume_item is not None:
+        updated = run_resume(args, resume_item, now, bins)
+        if updated.last_output:
+            log_line(f"{updated.provider}:{updated.session_id[:8]}: {updated.last_output}")
+        with queue_lock(args.queue, args.lock_timeout_seconds):
+            items = load_queue(args.queue)
+            merge_resumed_item(items, updated)
+            write_queue(args.queue, items)
+    return processed
+
+
 def cmd_watch(args) -> int:
     bins = enabled_provider_bins(args)
+    if not bins:
+        print(
+            "No Claude or Codex executable found. Pass --claude-bin or --codex-bin.",
+            file=sys.stderr,
+        )
+        return 1
     if not args.once:
         # One line per daemon start so the log always answers "is it running,
         # and which build" even when no queue events ever fire.
         log_line(f"tokenmaxx {__version__} watching {args.queue} every {args.sleep_seconds}s")
     while True:
-        now = int(args.now or time.time())
-        resume_item = None
-        processed = False
-        with queue_lock(args.queue, args.lock_timeout_seconds):
-            items = load_queue(args.queue)
-            dirty = False
-            if args.auto_queue:
-                queued = []
-                for provider in bins:
-                    sessions = load_provider_sessions(args, provider, now)
-                    queued.extend(autoqueue_limited_sessions(args, items, now, sessions, provider))
-                if queued:
-                    dirty = True
-                    log_line(autoqueued_message(len(queued)))
-            for index, item in enumerate(items):
-                if not is_due(item, now):
-                    continue
-                identity = f"{item.provider}:{item.session_id[:8]}"
-                if item.provider not in bins:
-                    reason = f"{item.provider} executable unavailable"
-                    if args.dry_run:
-                        log_line(f"Would defer {identity}: {reason}.")
-                    else:
-                        items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
-                        dirty = True
-                        log_line(f"Deferred {identity}: {reason}.")
-                    continue
-                # Fresh session snapshot per due item: the auto-queue transcript
-                # scan above can take seconds, and the guard should act on data
-                # milliseconds old. The residual check-to-resume window is
-                # irreducible in a poll-based design.
-                owner = find_active_provider_session(args, item, now)
-                if owner is not None:
-                    pid = owner.get("pid")
-                    reason = f"session active in pid {pid}" if pid is not None else "session active"
-                    if args.dry_run:
-                        log_line(f"Would defer {identity}: {reason}.")
-                    else:
-                        items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
-                        dirty = True
-                        log_line(f"Deferred {identity}: {reason}.")
-                    continue
-                if args.dry_run:
-                    items[index] = run_resume(args, item, now, bins)
-                    dirty = True
-                    if items[index].last_output:
-                        log_line(f"{identity}: {items[index].last_output}")
-                    processed = True
-                    break
-                # Claim with a lease and resume OUTSIDE the lock, so status,
-                # add, and drop stay usable during a resume that can run for
-                # hours. If this process dies mid-resume, the lease expires and
-                # the item resurfaces.
-                resume_item = dataclasses.replace(item)
-                lease_seconds = args.resume_timeout_seconds if args.resume_timeout_seconds > 0 else 86_400
-                item.next_attempt_at = now + lease_seconds + 300
-                item.updated_at = now
-                dirty = True
-                processed = True
-                break
-            if dirty:
-                write_queue(args.queue, items)
-        if resume_item is not None:
-            updated = run_resume(args, resume_item, now, bins)
-            if updated.last_output:
-                log_line(f"{updated.provider}:{updated.session_id[:8]}: {updated.last_output}")
-            with queue_lock(args.queue, args.lock_timeout_seconds):
-                items = load_queue(args.queue)
-                merge_resumed_item(items, updated)
-                write_queue(args.queue, items)
+        guard = nullcontext(True) if args.dry_run else resume_lock(args.queue)
+        with guard as acquired:
+            if not acquired:
+                log_line("Resume already in progress; skipping watch cycle.")
+                return 0
+            processed = run_watch_cycle(args, bins)
         if args.once:
             if not processed:
                 print("No due items.")
