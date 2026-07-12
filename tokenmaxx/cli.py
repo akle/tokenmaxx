@@ -9,13 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__
-from .claude import (
-    build_limited_queue_items,
-    find_active_session,
-    load_claude_sessions,
-    run_due_item,
-)
+from . import __version__, claude, codex
 from .config import (
     DEFAULT_ACTIVE_GRACE_SECONDS,
     DEFAULT_FOLLOWUP_DELAY_SECONDS,
@@ -24,6 +18,7 @@ from .config import (
     DEFAULT_MAX_SESSION_AGE_HOURS,
     DEFAULT_RETRY_DELAY_SECONDS,
     DEFAULT_RESUME_TIMEOUT_SECONDS,
+    default_codex_sessions_dir,
     default_log_path,
     default_plist_path,
     default_projects_dir,
@@ -50,8 +45,22 @@ from .queue import (
 )
 
 
+def load_provider_sessions(args, provider: str, now: int) -> list[dict]:
+    if provider == "claude":
+        return claude.load_claude_sessions(args.sessions_dir)
+    if provider == "codex":
+        return codex.load_codex_sessions(
+            args.codex_sessions_dir,
+            now=now,
+            max_session_age_hours=args.max_session_age_hours,
+        )
+    raise ValueError(f"unsupported provider: {provider}")
+
+
 def find_session(args) -> dict | None:
-    sessions = load_claude_sessions(args.sessions_dir)
+    provider = args.provider or "claude"
+    now = int(args.now or time.time())
+    sessions = load_provider_sessions(args, provider, now)
     for session in sessions:
         if args.pid is not None and int(session.get("pid", -1)) == int(args.pid):
             return session
@@ -73,7 +82,7 @@ def log_line(message: str) -> None:
 
 
 def print_sessions(sessions: list[dict]) -> None:
-    print("PID     STATUS  UPDATED              CWD                                           SESSION")
+    print("PID     STATUS  UPDATED              CWD                                           PROVIDER SESSION")
     for session in sessions:
         pid = str(session.get("pid", "-"))[:7].ljust(7)
         status = str(session.get("status") or "-")[:7].ljust(7)
@@ -82,24 +91,32 @@ def print_sessions(sessions: list[dict]) -> None:
         cwd = str(session.get("cwd", "-"))
         if len(cwd) > 43:
             cwd = "..." + cwd[-40:]
-        print(f"{pid} {status} {updated:<19} {cwd:<45} {session.get('sessionId')}")
+        print(
+            f"{pid} {status} {updated:<19} {cwd:<45} "
+            f"{session.get('_provider', 'claude'):<8} {session.get('sessionId')}"
+        )
 
 
 def cmd_scan(args) -> int:
-    sessions = load_claude_sessions(args.sessions_dir)
+    now = int(getattr(args, "now", 0) or time.time())
+    sessions = []
+    for provider in ("claude", "codex"):
+        sessions.extend(dict(session, _provider=provider) for session in load_provider_sessions(args, provider, now))
     print_sessions(sessions)
     return 0
 
 
 def cmd_add(args) -> int:
+    provider = args.provider or "claude"
     session = find_session(args)
     if not session:
-        print("No matching Claude session found.", file=sys.stderr)
+        print(f"No matching {provider.title()} session found.", file=sys.stderr)
         return 1
-    item = QueueItem(cwd=args.cwd or session["cwd"], session_id=session["sessionId"])
+    item = QueueItem(cwd=args.cwd or session["cwd"], session_id=session["sessionId"], provider=provider)
     with queue_lock(args.queue, args.lock_timeout_seconds):
         append_queue_item(args.queue, item)
-    print(f"Queued {item.session_id} in {item.cwd}")
+    identity = item.session_id if item.provider == "claude" else f"{item.provider}:{item.session_id}"
+    print(f"Queued {identity} in {item.cwd}")
     return 0
 
 
@@ -150,11 +167,11 @@ def summarize_queue(items: list[QueueItem], queue: Path) -> None:
     )
     directories = [truncate_left(display_path(item.cwd), 36) for item in rows]
     dir_width = max(len(text) for text in directories + ["DIRECTORY"])
-    template = f"{{:<8}} {{:>3}}  {{:<16}}  {{:<8}}  {{:<{dir_width}}}  {{}}"
+    template = f"{{:<8}} {{:>3}}  {{:<16}}  {{:<8}}  {{:<8}}  {{:<{dir_width}}}  {{}}"
     term_width = shutil.get_terminal_size(fallback=(120, 24)).columns
-    last_width = max(20, term_width - (8 + 1 + 3 + 2 + 16 + 2 + 8 + 2 + dir_width + 2))
+    last_width = max(20, term_width - (8 + 1 + 3 + 2 + 16 + 2 + 8 + 2 + 8 + 2 + dir_width + 2))
 
-    print(template.format("STATUS", "ATT", "NEXT", "SESSION", "DIRECTORY", "LAST"))
+    print(template.format("STATUS", "ATT", "NEXT", "PROVIDER", "SESSION", "DIRECTORY", "LAST"))
     for item, directory in zip(rows, directories):
         if is_due(item):
             next_attempt = "due now"
@@ -168,6 +185,7 @@ def summarize_queue(items: list[QueueItem], queue: Path) -> None:
                 item.status,
                 item.attempts,
                 next_attempt,
+                item.provider,
                 item.session_id[:8],
                 directory,
                 truncate_right(detail, last_width),
@@ -190,14 +208,29 @@ def print_daemon_state(args) -> None:
     print(f"Log:    {args.log_path}")
 
 
-def autoqueue_limited_sessions(args, items: list[QueueItem], now: int, sessions: list[dict]) -> list[QueueItem]:
-    return build_limited_queue_items(
-        sessions,
-        items,
-        projects_dir=args.projects_dir,
-        now=now,
-        max_session_age_hours=args.max_session_age_hours,
-    )
+def autoqueue_limited_sessions(
+    args,
+    items: list[QueueItem],
+    now: int,
+    sessions: list[dict],
+    provider: str = "claude",
+) -> list[QueueItem]:
+    if provider == "claude":
+        return claude.build_limited_queue_items(
+            sessions,
+            items,
+            projects_dir=args.projects_dir,
+            now=now,
+            max_session_age_hours=args.max_session_age_hours,
+        )
+    if provider == "codex":
+        return codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=now,
+            max_session_age_hours=args.max_session_age_hours,
+        )
+    raise ValueError(f"unsupported provider: {provider}")
 
 
 def autoqueued_message(count: int) -> str:
@@ -207,10 +240,12 @@ def autoqueued_message(count: int) -> str:
 
 def cmd_autoqueue(args) -> int:
     now = int(args.now or time.time())
-    sessions = load_claude_sessions(args.sessions_dir)
     with queue_lock(args.queue, args.lock_timeout_seconds):
         items = load_queue(args.queue)
-        queued = autoqueue_limited_sessions(args, items, now, sessions)
+        queued = []
+        for provider in ("claude", "codex"):
+            sessions = load_provider_sessions(args, provider, now)
+            queued.extend(autoqueue_limited_sessions(args, items, now, sessions, provider))
         if queued:
             write_queue(args.queue, items)
     print(autoqueued_message(len(queued)))
@@ -225,39 +260,78 @@ def cmd_drop(args) -> int:
     now = int(time.time())
     with queue_lock(args.queue, args.lock_timeout_seconds):
         items = load_queue(args.queue)
-        matches = sorted({item.session_id for item in items if item.session_id.startswith(args.session_id)})
+        matches = sorted(
+            {
+                item.key
+                for item in items
+                if item.session_id.startswith(args.session_id)
+                and (args.provider is None or item.provider == args.provider)
+            }
+        )
         if not matches:
             print(f"No queued item for session {args.session_id}.", file=sys.stderr)
             return 1
         if len(matches) > 1:
-            print(f"Ambiguous session prefix {args.session_id}: matches {', '.join(matches)}.", file=sys.stderr)
+            qualified = ", ".join(f"{provider}:{session_id}" for provider, session_id in matches)
+            print(f"Ambiguous session prefix {args.session_id}: matches {qualified}.", file=sys.stderr)
             return 1
-        session_id = matches[0]
+        provider, session_id = matches[0]
         for item in items:
-            if item.session_id == session_id:
+            if item.key == (provider, session_id):
                 item.status = "blocked"
                 item.blocked_reason = "dropped by user"
                 item.next_attempt_at = 0
                 item.updated_at = now
         write_queue(args.queue, items)
-    print(f"Dropped {session_id}. Kept as a blocked tombstone so auto-queue will not re-add it.")
+    identity = session_id if args.provider is None and provider == "claude" else f"{provider}:{session_id}"
+    print(f"Dropped {identity}. Kept as a blocked tombstone so auto-queue will not re-add it.")
     return 0
 
 
-def run_resume(args, item: QueueItem, now: int) -> QueueItem:
-    return run_due_item(
-        item,
+def resolve_provider_bin(provider: str, requested: str | None = None) -> str | None:
+    if provider not in {"claude", "codex"}:
+        raise ValueError(f"unsupported provider: {provider}")
+    candidate = requested or provider
+    expanded = Path(candidate).expanduser()
+    return shutil.which(str(expanded) if expanded.is_absolute() else candidate)
+
+
+def enabled_provider_bins(args) -> dict[str, str]:
+    bins = {}
+    for provider in ("claude", "codex"):
+        resolved = resolve_provider_bin(provider, getattr(args, f"{provider}_bin", None))
+        if resolved:
+            bins[provider] = resolved
+    return bins
+
+
+def run_resume(args, item: QueueItem, now: int, bins: dict[str, str]) -> QueueItem:
+    common = dict(
         now=now,
-        claude_bin=args.claude_bin,
         dry_run=args.dry_run,
         retry_delay_seconds=args.retry_delay_seconds,
         followup_delay_seconds=args.followup_delay_seconds,
         max_attempts=args.max_attempts,
         resume_timeout_seconds=args.resume_timeout_seconds,
     )
+    if item.provider == "claude":
+        return claude.run_due_item(item, claude_bin=bins["claude"], **common)
+    if item.provider == "codex":
+        return codex.run_due_item(item, codex_bin=bins["codex"], **common)
+    raise ValueError(f"unsupported provider: {item.provider}")
+
+
+def find_active_provider_session(args, item: QueueItem, now: int) -> dict | None:
+    sessions = load_provider_sessions(args, item.provider, now)
+    if item.provider == "claude":
+        return claude.find_active_session(sessions, item.session_id, now, DEFAULT_ACTIVE_GRACE_SECONDS)
+    if item.provider == "codex":
+        return codex.find_active_session(sessions, item.session_id, now, DEFAULT_ACTIVE_GRACE_SECONDS)
+    raise ValueError(f"unsupported provider: {item.provider}")
 
 
 def cmd_watch(args) -> int:
+    bins = enabled_provider_bins(args)
     if not args.once:
         # One line per daemon start so the log always answers "is it running,
         # and which build" even when no queue events ever fire.
@@ -270,34 +344,46 @@ def cmd_watch(args) -> int:
             items = load_queue(args.queue)
             dirty = False
             if args.auto_queue:
-                queued = autoqueue_limited_sessions(args, items, now, load_claude_sessions(args.sessions_dir))
+                queued = []
+                for provider in bins:
+                    sessions = load_provider_sessions(args, provider, now)
+                    queued.extend(autoqueue_limited_sessions(args, items, now, sessions, provider))
                 if queued:
                     dirty = True
                     log_line(autoqueued_message(len(queued)))
             for index, item in enumerate(items):
                 if not is_due(item, now):
                     continue
+                identity = f"{item.provider}:{item.session_id[:8]}"
+                if item.provider not in bins:
+                    reason = f"{item.provider} executable unavailable"
+                    if args.dry_run:
+                        log_line(f"Would defer {identity}: {reason}.")
+                    else:
+                        items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
+                        dirty = True
+                        log_line(f"Deferred {identity}: {reason}.")
+                    continue
                 # Fresh session snapshot per due item: the auto-queue transcript
                 # scan above can take seconds, and the guard should act on data
                 # milliseconds old. The residual check-to-resume window is
                 # irreducible in a poll-based design.
-                owner = find_active_session(
-                    load_claude_sessions(args.sessions_dir), item.session_id, now, DEFAULT_ACTIVE_GRACE_SECONDS
-                )
+                owner = find_active_provider_session(args, item, now)
                 if owner is not None:
-                    reason = f"session active in pid {owner.get('pid')}"
+                    pid = owner.get("pid")
+                    reason = f"session active in pid {pid}" if pid is not None else "session active"
                     if args.dry_run:
-                        log_line(f"Would defer {item.session_id}: {reason}.")
+                        log_line(f"Would defer {identity}: {reason}.")
                     else:
                         items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
                         dirty = True
-                        log_line(f"Deferred {item.session_id}: {reason}.")
+                        log_line(f"Deferred {identity}: {reason}.")
                     continue
                 if args.dry_run:
-                    items[index] = run_resume(args, item, now)
+                    items[index] = run_resume(args, item, now, bins)
                     dirty = True
                     if items[index].last_output:
-                        log_line(f"{item.session_id[:8]}: {items[index].last_output}")
+                        log_line(f"{identity}: {items[index].last_output}")
                     processed = True
                     break
                 # Claim with a lease and resume OUTSIDE the lock, so status,
@@ -314,9 +400,9 @@ def cmd_watch(args) -> int:
             if dirty:
                 write_queue(args.queue, items)
         if resume_item is not None:
-            updated = run_resume(args, resume_item, now)
+            updated = run_resume(args, resume_item, now, bins)
             if updated.last_output:
-                log_line(f"{updated.session_id[:8]}: {updated.last_output}")
+                log_line(f"{updated.provider}:{updated.session_id[:8]}: {updated.last_output}")
             with queue_lock(args.queue, args.lock_timeout_seconds):
                 items = load_queue(args.queue)
                 merge_resumed_item(items, updated)
@@ -479,21 +565,26 @@ def cmd_launchd_uninstall(args) -> int:
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--queue", type=Path, default=default_queue_path())
     parser.add_argument("--sessions-dir", type=Path, default=default_sessions_dir())
+    parser.add_argument("--codex-sessions-dir", type=Path, default=default_codex_sessions_dir())
     parser.add_argument("--projects-dir", type=Path, default=default_projects_dir())
     parser.add_argument("--lock-timeout-seconds", type=int, default=10)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Queue and resume Claude Code sessions after limit windows reset.")
+    parser = argparse.ArgumentParser(description="Queue and resume coding sessions after provider limit windows reset.")
     parser.add_argument("--version", action="version", version=f"tokenmaxx {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    scan = subparsers.add_parser("scan", help="list local Claude Code sessions")
+    scan = subparsers.add_parser("scan", help="list local Claude Code and Codex sessions")
     add_common_args(scan)
+    scan.add_argument("--max-session-age-hours", type=float, default=DEFAULT_MAX_SESSION_AGE_HOURS)
     scan.set_defaults(func=cmd_scan)
 
-    add = subparsers.add_parser("add", help="add a Claude session to the retry queue")
+    add = subparsers.add_parser("add", help="add a session to the retry queue")
     add_common_args(add)
+    add.add_argument("--provider", choices=("claude", "codex"), default="claude")
+    add.add_argument("--max-session-age-hours", type=float, default=DEFAULT_MAX_SESSION_AGE_HOURS)
+    add.add_argument("--now", type=int, default=0, help=argparse.SUPPRESS)
     selector = add.add_mutually_exclusive_group(required=True)
     selector.add_argument("--pid", type=int)
     selector.add_argument("--session-id")
@@ -512,9 +603,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_args(drop)
     drop.add_argument("--session-id", required=True)
+    drop.add_argument("--provider", choices=("claude", "codex"))
     drop.set_defaults(func=cmd_drop)
 
-    autoqueue = subparsers.add_parser("autoqueue", help="queue recent Claude sessions whose transcripts show a limit error")
+    autoqueue = subparsers.add_parser("autoqueue", help="queue recent sessions whose transcripts show a limit error")
     add_common_args(autoqueue)
     autoqueue.add_argument("--max-session-age-hours", type=float, default=DEFAULT_MAX_SESSION_AGE_HOURS)
     autoqueue.add_argument("--now", type=int, default=0, help=argparse.SUPPRESS)
@@ -522,7 +614,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     watch = subparsers.add_parser("watch", help="resume due sessions")
     add_common_args(watch)
-    watch.add_argument("--claude-bin", default="claude")
+    watch.add_argument("--claude-bin", default=None)
+    watch.add_argument("--codex-bin", default=None)
     watch.add_argument("--retry-delay-seconds", type=int, default=DEFAULT_RETRY_DELAY_SECONDS)
     watch.add_argument("--followup-delay-seconds", type=int, default=DEFAULT_FOLLOWUP_DELAY_SECONDS)
     watch.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)

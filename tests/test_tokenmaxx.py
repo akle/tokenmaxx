@@ -52,8 +52,10 @@ class TokenmaxxTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.queue_path = self.root / "queue.jsonl"
         self.sessions_dir = self.root / "sessions"
+        self.codex_sessions_dir = self.root / "codex-sessions"
         self.projects_dir = self.root / "projects"
         self.sessions_dir.mkdir()
+        self.codex_sessions_dir.mkdir()
         self.projects_dir.mkdir()
 
     def tearDown(self):
@@ -63,6 +65,7 @@ class TokenmaxxTests(unittest.TestCase):
         defaults = {
             "queue": self.queue_path,
             "sessions_dir": self.sessions_dir,
+            "codex_sessions_dir": self.codex_sessions_dir,
             "projects_dir": self.projects_dir,
             "pid": None,
             "session_id": None,
@@ -73,6 +76,8 @@ class TokenmaxxTests(unittest.TestCase):
             "resume_timeout_seconds": 7_200,
             "lock_timeout_seconds": 1,
             "claude_bin": "claude",
+            "codex_bin": "codex",
+            "provider": None,
             "dry_run": True,
             "once": True,
             "sleep_seconds": 0,
@@ -99,6 +104,23 @@ class TokenmaxxTests(unittest.TestCase):
         project_dir.mkdir(exist_ok=True)
         path = project_dir / f"{session_id}.jsonl"
         path.write_text(text)
+        return path
+
+    def write_codex_session(self, session_id, cwd="/tmp/codex", event=None, timestamp="1970-01-01T00:16:39Z"):
+        path = self.codex_sessions_dir / f"{session_id}.jsonl"
+        records = [
+            {"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}},
+        ]
+        if event is not None:
+            records.append(
+                {
+                    "type": "event_msg",
+                    "timestamp": timestamp,
+                    "payload": event,
+                }
+            )
+        path.write_text("".join(json.dumps(record) + "\n" for record in records))
+        os.utime(path, (999, 999))
         return path
 
     def test_queue_round_trip_and_status_helpers(self):
@@ -321,6 +343,28 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(load_queue(self.queue_path)[0].session_id, "abc")
 
+    def test_add_writes_selected_codex_session_to_queue(self):
+        self.write_codex_session("codex-abc")
+        with redirect_stdout(io.StringIO()):
+            code = cli.cmd_add(self.args(session_id="codex-abc", provider="codex"))
+        self.assertEqual(code, 0)
+        item = load_queue(self.queue_path)[0]
+        self.assertEqual(item.key, ("codex", "codex-abc"))
+
+    def test_scan_lists_both_providers(self):
+        self.write_session(
+            "claude.json",
+            {"pid": 1, "status": "idle", "cwd": "/tmp/claude", "sessionId": "claude-abc"},
+        )
+        self.write_codex_session("codex-abc")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_scan(self.args())
+        self.assertEqual(code, 0)
+        self.assertRegex(output.getvalue(), r"PROVIDER\s+SESSION")
+        self.assertIn("claude-abc", output.getvalue())
+        self.assertIn("codex-abc", output.getvalue())
+
     def test_autoqueue_adds_recent_limited_sessions_once(self):
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/already", session_id="already"))
         self.write_session(
@@ -375,6 +419,23 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Auto-queued 1 session", output.getvalue())
         self.assertEqual([item.session_id for item in load_queue(self.queue_path)], ["already", "limited"])
+
+    def test_autoqueue_adds_limited_sessions_from_both_providers(self):
+        self.write_session(
+            "claude.json",
+            {"pid": 1, "status": "idle", "cwd": "/tmp/claude", "sessionId": "same", "updatedAt": 999_000},
+        )
+        self.write_transcript("same", synthetic_line("usage limit reached", timestamp="1970-01-01T00:16:39Z"))
+        self.write_codex_session(
+            "same",
+            event={"type": "error", "codex_error_info": "usage_limit_exceeded", "message": "limited"},
+        )
+
+        with redirect_stdout(io.StringIO()):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertEqual({item.key for item in load_queue(self.queue_path)}, {("claude", "same"), ("codex", "same")})
 
     def rearm_fixture(self, existing_status, existing_updated_at, banner_timestamp, blocked_reason=""):
         append_queue_item(
@@ -552,8 +613,68 @@ class TokenmaxxTests(unittest.TestCase):
         with redirect_stdout(output):
             code = cli.cmd_watch(self.args(dry_run=True))
         self.assertEqual(code, 0)
-        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+        self.assertIn("claude --resume abc", output.getvalue())
         self.assertRegex(output.getvalue(), r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]")
+
+    def test_watch_dry_run_dispatches_due_codex_item(self):
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/repo", session_id="codex-session", provider="codex"),
+        )
+        output = io.StringIO()
+        with patch("tokenmaxx.cli.shutil.which", side_effect=lambda name: name), redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, auto_queue=False))
+        self.assertEqual(code, 0)
+        self.assertIn("codex exec resume codex-session", output.getvalue())
+
+    def test_watch_defers_due_item_when_provider_executable_is_missing(self):
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/repo", session_id="codex-session", provider="codex"),
+        )
+        output = io.StringIO()
+        with patch("tokenmaxx.cli.shutil.which", side_effect=lambda name: name if name == "claude" else None), redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=False, auto_queue=False))
+        self.assertEqual(code, 0)
+        self.assertIn("Deferred codex:codex-se: codex executable unavailable", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].next_attempt_at, 1900)
+
+    def test_watch_processes_only_one_due_item_across_providers(self):
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/c", session_id="claude-session"))
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/x", session_id="codex-session", provider="codex"),
+        )
+        output = io.StringIO()
+        with patch("tokenmaxx.cli.shutil.which", side_effect=lambda name: name), redirect_stdout(output):
+            code = cli.cmd_watch(self.args(dry_run=True, auto_queue=False))
+        self.assertEqual(code, 0)
+        self.assertIn("claude --resume claude-session", output.getvalue())
+        self.assertNotIn("codex exec resume", output.getvalue())
+
+    def test_resolve_provider_bin_rejects_missing_absolute_path(self):
+        missing = self.root / "missing-codex"
+        self.assertIsNone(cli.resolve_provider_bin("codex", str(missing)))
+
+    def test_parser_accepts_codex_provider_paths_and_selectors(self):
+        parser = cli.build_parser()
+        add_args = parser.parse_args(
+            [
+                "add",
+                "--provider",
+                "codex",
+                "--session-id",
+                "abc",
+                "--codex-sessions-dir",
+                str(self.codex_sessions_dir),
+            ]
+        )
+        watch_args = parser.parse_args(["watch", "--codex-bin", "/usr/local/bin/codex"])
+        drop_args = parser.parse_args(["drop", "--provider", "codex", "--session-id", "abc"])
+        self.assertEqual(add_args.provider, "codex")
+        self.assertEqual(add_args.codex_sessions_dir, self.codex_sessions_dir)
+        self.assertEqual(watch_args.codex_bin, "/usr/local/bin/codex")
+        self.assertEqual(drop_args.provider, "codex")
 
     def test_watch_defers_item_owned_by_busy_session(self):
         now = 1_000_000
@@ -574,7 +695,7 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=False, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
-        self.assertIn("Deferred abc", output.getvalue())
+        self.assertIn("Deferred claude:abc", output.getvalue())
         self.assertNotIn("DRY RUN", output.getvalue())
         item = load_queue(self.queue_path)[0]
         self.assertEqual(item.status, "pending")
@@ -600,7 +721,7 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
-        self.assertIn("Would defer abc", output.getvalue())
+        self.assertIn("Would defer claude:abc", output.getvalue())
         self.assertEqual(load_queue(self.queue_path)[0].next_attempt_at, 0)
 
     def test_watch_defers_item_owned_by_recently_active_session(self):
@@ -622,7 +743,7 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=False, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
-        self.assertIn("Deferred abc", output.getvalue())
+        self.assertIn("Deferred claude:abc", output.getvalue())
         self.assertEqual(load_queue(self.queue_path)[0].next_attempt_at, now + 900)
 
     def test_watch_resumes_item_with_stale_busy_session_file(self):
@@ -644,7 +765,7 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
-        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+        self.assertIn("claude --resume abc", output.getvalue())
 
     def test_watch_resumes_item_with_stale_idle_session(self):
         now = 1_000_000
@@ -665,7 +786,7 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
-        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+        self.assertIn("claude --resume abc", output.getvalue())
 
     def test_watch_resumes_item_whose_owner_process_died(self):
         now = 1_000_000
@@ -686,7 +807,7 @@ class TokenmaxxTests(unittest.TestCase):
             code = cli.cmd_watch(self.args(dry_run=True, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
-        self.assertIn("DRY RUN: claude --resume abc", output.getvalue())
+        self.assertIn("claude --resume abc", output.getvalue())
 
     def test_watch_autoqueues_before_processing_due_item(self):
         self.write_session(
@@ -706,7 +827,7 @@ class TokenmaxxTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertIn("Auto-queued 1 session", output.getvalue())
-        self.assertIn("DRY RUN: claude --resume limited", output.getvalue())
+        self.assertIn("claude --resume limited", output.getvalue())
 
     def test_status_prints_columnar_queue_table(self):
         append_queue_item(
@@ -742,7 +863,7 @@ class TokenmaxxTests(unittest.TestCase):
         header, pending_row, blocked_row = [
             line for line in rendered.splitlines() if line.startswith(("STATUS", "pending", "blocked"))
         ]
-        self.assertRegex(header, r"STATUS\s+ATT\s+NEXT\s+SESSION\s+DIRECTORY\s+LAST")
+        self.assertRegex(header, r"STATUS\s+ATT\s+NEXT\s+PROVIDER\s+SESSION\s+DIRECTORY\s+LAST")
         self.assertIn("abcdef12", pending_row)
         self.assertNotIn("abcdef12-3456", pending_row)
         self.assertIn("~/dev/repo", pending_row)
@@ -752,6 +873,22 @@ class TokenmaxxTests(unittest.TestCase):
         offset = header.index("SESSION")
         self.assertEqual(pending_row[offset : offset + 8], "abcdef12")
         self.assertEqual(blocked_row[offset : offset + 8], "99999999")
+
+    def test_status_qualifies_mixed_provider_rows(self):
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/c", session_id="same", provider="claude"),
+        )
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/x", session_id="same", provider="codex"),
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            cli.cmd_status(self.args())
+        self.assertRegex(output.getvalue(), r"PROVIDER\s+SESSION")
+        self.assertIn("claude", output.getvalue())
+        self.assertIn("codex", output.getvalue())
 
     def test_status_orders_pending_before_blocked_and_done(self):
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/r", session_id="done-item", status="done"))
@@ -785,6 +922,22 @@ class TokenmaxxTests(unittest.TestCase):
         by_id = {item.session_id[:8]: item for item in load_queue(self.queue_path)}
         self.assertEqual(by_id["abcdef12"].status, "blocked")
         self.assertEqual(by_id["99999999"].status, "pending")
+
+    def test_drop_provider_filter_targets_one_matching_id(self):
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/c", session_id="same", provider="claude"),
+        )
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/x", session_id="same", provider="codex"),
+        )
+        with redirect_stdout(io.StringIO()):
+            code = cli.cmd_drop(self.args(session_id="same", provider="codex"))
+        self.assertEqual(code, 0)
+        rows = {item.provider: item for item in load_queue(self.queue_path)}
+        self.assertEqual(rows["claude"].status, "pending")
+        self.assertEqual(rows["codex"].status, "blocked")
 
     def test_drop_rejects_ambiguous_prefix(self):
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc-one"))
@@ -914,7 +1067,7 @@ class TokenmaxxTests(unittest.TestCase):
             return updated
 
         output = io.StringIO()
-        with patch("tokenmaxx.cli.run_due_item", side_effect=fake_run), redirect_stdout(output):
+        with patch("tokenmaxx.cli.claude.run_due_item", side_effect=fake_run), redirect_stdout(output):
             code = cli.cmd_watch(self.args(dry_run=False, now=now, auto_queue=False))
 
         self.assertEqual(code, 0)
