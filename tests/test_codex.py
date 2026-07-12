@@ -149,6 +149,25 @@ class CodexTests(unittest.TestCase):
         self.assertIsNone(codex.find_active_session(sessions, "complete", 1000, 30))
         self.assertIsNone(codex.find_active_session(sessions, "active", 1000 + 86_400, 30))
 
+    def test_deleted_discovered_rollout_is_skipped_by_limit_and_activity_checks(self):
+        path = self.write_rollout(
+            records=(
+                event("task_started", "1970-01-01T00:16:10Z"),
+                event("error", "1970-01-01T00:16:20Z", codex_error_info="usage_limit_exceeded"),
+            ),
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+        path.unlink()
+
+        try:
+            limit_hit_at = codex.session_limit_hit_at(session)
+            is_active = codex.session_is_active(session, now=1000, grace_seconds=30)
+        except FileNotFoundError as exc:
+            self.fail(f"deleted rollout must be skipped: {exc}")
+
+        self.assertIsNone(limit_hit_at)
+        self.assertFalse(is_active)
+
     def test_build_limited_queue_items_sets_codex_provider(self):
         self.write_rollout(
             records=(event("error", "1970-01-01T00:16:20Z", codex_error_info="usage_limit_exceeded"),)

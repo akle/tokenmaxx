@@ -351,6 +351,51 @@ class TokenmaxxTests(unittest.TestCase):
         item = load_queue(self.queue_path)[0]
         self.assertEqual(item.key, ("codex", "codex-abc"))
 
+    def test_add_deduplicates_pending_composite_identity(self):
+        self.write_session(
+            "80544.json",
+            {"pid": 80544, "status": "busy", "cwd": "/tmp/claude", "sessionId": "same"},
+        )
+        self.write_codex_session("same")
+
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.cmd_add(self.args(pid=80544, provider="claude")), 0)
+            self.assertEqual(cli.cmd_add(self.args(session_id="same", provider="codex")), 0)
+            self.assertEqual(cli.cmd_add(self.args(session_id="same", provider="codex")), 0)
+
+        self.assertEqual(
+            [item.key for item in load_queue(self.queue_path)],
+            [("claude", "same"), ("codex", "same")],
+        )
+
+    def test_add_rearms_resolved_item_in_place(self):
+        self.write_codex_session("codex-abc", cwd="/tmp/new-cwd")
+        append_queue_item(
+            self.queue_path,
+            QueueItem(
+                cwd="/tmp/old-cwd",
+                session_id="codex-abc",
+                provider="codex",
+                status="blocked",
+                attempts=3,
+                next_attempt_at=1234,
+                last_output="old output",
+                blocked_reason="dropped by user",
+            ),
+        )
+
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.cmd_add(self.args(session_id="codex-abc", provider="codex")), 0)
+
+        items = load_queue(self.queue_path)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].status, "pending")
+        self.assertEqual(items[0].cwd, "/tmp/new-cwd")
+        self.assertEqual(items[0].attempts, 0)
+        self.assertEqual(items[0].next_attempt_at, 0)
+        self.assertEqual(items[0].last_output, "")
+        self.assertEqual(items[0].blocked_reason, "")
+
     def test_scan_lists_both_providers(self):
         self.write_session(
             "claude.json",
@@ -938,6 +983,24 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertRegex(output.getvalue(), r"PROVIDER\s+SESSION")
         self.assertIn("claude", output.getvalue())
         self.assertIn("codex", output.getvalue())
+
+    def test_status_cli_rejects_unknown_queue_provider_without_traceback(self):
+        self.queue_path.write_text(
+            json.dumps({"cwd": "/tmp/repo", "sessionId": "abc", "provider": "unknown"}) + "\n"
+        )
+        output = io.StringIO()
+        errors = io.StringIO()
+
+        try:
+            with patch("tokenmaxx.cli.launchd_state"), redirect_stdout(output), redirect_stderr(errors):
+                code = cli.main(["status", "--queue", str(self.queue_path)])
+        except ValueError as exc:
+            self.fail(f"CLI must reject malformed persisted state without raising: {exc}")
+
+        self.assertEqual(code, 1)
+        self.assertIn("invalid queue line 1", errors.getvalue())
+        self.assertIn("unsupported provider: unknown", errors.getvalue())
+        self.assertNotIn("Traceback", errors.getvalue())
 
     def test_status_orders_pending_before_blocked_and_done(self):
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/r", session_id="done-item", status="done"))

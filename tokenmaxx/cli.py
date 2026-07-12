@@ -35,7 +35,6 @@ from .launchd import (
 )
 from .queue import (
     QueueItem,
-    append_queue_item,
     defer_item,
     is_due,
     load_queue,
@@ -116,7 +115,22 @@ def cmd_add(args) -> int:
         return 1
     item = QueueItem(cwd=args.cwd or session["cwd"], session_id=session["sessionId"], provider=provider)
     with queue_lock(args.queue, args.lock_timeout_seconds):
-        append_queue_item(args.queue, item)
+        items = load_queue(args.queue)
+        matches = [existing for existing in items if existing.key == item.key]
+        if matches:
+            existing = next((row for row in matches if row.status == "pending"), matches[0])
+            items = [row for row in items if row.key != item.key or row is existing]
+            if existing.status != "pending":
+                existing.cwd = item.cwd
+                existing.status = "pending"
+                existing.next_attempt_at = 0
+                existing.attempts = 0
+                existing.last_output = ""
+                existing.blocked_reason = ""
+                existing.updated_at = item.updated_at
+        else:
+            items.append(item)
+        write_queue(args.queue, items)
     identity = item.session_id if item.provider == "claude" else f"{item.provider}:{item.session_id}"
     print(f"Queued {identity} in {item.cwd}")
     return 0
@@ -707,6 +721,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.func(args)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     except TimeoutError:
         print(
             "Queue is locked by another tokenmaxx process. Retry in a moment, or run `tokenmaxx stop` first.",

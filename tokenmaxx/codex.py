@@ -125,7 +125,13 @@ def session_is_active(session: dict, now: int, grace_seconds: int) -> bool:
     path = session.get("_path")
     if not path:
         return now - session_updated_at_seconds(session) < grace_seconds
-    for record in reversed(tail_records(Path(path))):
+    rollout_path = Path(path)
+    if not rollout_path.is_file():
+        return False
+    records = tail_records(rollout_path)
+    if not rollout_path.is_file():
+        return False
+    for record in reversed(records):
         if record.get("type") != "event_msg":
             continue
         payload = record.get("payload")
