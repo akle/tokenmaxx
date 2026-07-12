@@ -138,7 +138,7 @@ def reset_time_from_output(text: str, now: int) -> int | None:
     # Dated banners use two separators: "resets Apr 23, 2pm" and
     # "resets May 12 at 2pm".
     match = re.search(
-        r"resets?\s+(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*|\s+at\s+))?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?",
+        r"(?:resets?|try\s+again\s+at)\s+(?:([A-Za-z]{3,9})\s+(\d{1,2})(?:,\s*|\s+at\s+))?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?",
         text,
         re.IGNORECASE,
     )

@@ -20,6 +20,14 @@ If it hit a usage/rate/session limit before finishing, resume the remaining work
 Before long work, write or update a checkpoint with completed work and next steps.
 Keep the response concise and operational."""
 
+CODEX_PROMPT = """Continue this Codex session only if unfinished.
+
+First inspect the current repo/session state and decide whether work remains.
+If the prior task is already complete, respond with exactly STATUS: DONE and stop.
+If it hit a usage limit before finishing, resume the remaining work.
+Do not change or bypass the configured sandbox or approval settings.
+When the task is complete, end with exactly STATUS: DONE."""
+
 
 def default_home() -> Path:
     return Path(os.environ.get("TOKENMAXX_HOME", Path.home() / ".tokenmaxx")).expanduser()

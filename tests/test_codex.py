@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 
 from tokenmaxx import codex
+from tokenmaxx.queue import QueueItem
 from tokenmaxx.transcript import tail_records
+
+
+def event(event_type, timestamp, **payload):
+    return {"type": "event_msg", "timestamp": timestamp, "payload": {"type": event_type, **payload}}
 
 
 class CodexTests(unittest.TestCase):
@@ -69,3 +74,111 @@ class CodexTests(unittest.TestCase):
             with self.subTest(name=name):
                 sessions = codex.load_codex_sessions(case_dir, now=1000, max_session_age_hours=1)
                 self.assertEqual(sessions, [])
+
+    def test_terminal_usage_limit_is_queued_but_generic_error_is_not(self):
+        self.write_rollout(
+            records=(
+                event("task_started", "1970-01-01T00:15:00Z"),
+                event(
+                    "error",
+                    "1970-01-01T00:16:20Z",
+                    codex_error_info="usage_limit_exceeded",
+                    message="You've hit your usage limit. Try again at 12:52 AM.",
+                ),
+                event("task_complete", "1970-01-01T00:16:21Z"),
+            )
+        )
+        self.write_rollout(
+            session_id="generic",
+            records=(
+                event(
+                    "error",
+                    "1970-01-01T00:16:20Z",
+                    codex_error_info="bad_request",
+                    message="usage limit mentioned by a file",
+                ),
+            ),
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        limited = next(row for row in sessions if row["sessionId"] == "codex-1")
+        generic = next(row for row in sessions if row["sessionId"] == "generic")
+
+        self.assertEqual(codex.session_limit_hit_at(limited), 980)
+        self.assertIsNone(codex.session_limit_hit_at(generic))
+
+    def test_exact_uncoded_limit_message_is_accepted(self):
+        self.write_rollout(
+            records=(
+                event(
+                    "error",
+                    "1970-01-01T00:16:20Z",
+                    message="You've hit your usage limit. Try again at 12:52 AM.",
+                ),
+            )
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+
+        self.assertEqual(codex.session_limit_hit_at(session), 980)
+
+    def test_newer_task_started_suppresses_old_limit(self):
+        self.write_rollout(
+            records=(
+                event("error", "1970-01-01T00:15:00Z", codex_error_info="usage_limit_exceeded"),
+                event("task_started", "1970-01-01T00:16:20Z"),
+            )
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+
+        self.assertIsNone(codex.session_limit_hit_at(session))
+
+    def test_active_session_uses_newest_task_state_and_expires_after_a_day(self):
+        self.write_rollout(
+            session_id="active",
+            records=(event("task_started", "1970-01-01T00:16:20Z"),),
+        )
+        self.write_rollout(
+            session_id="complete",
+            records=(
+                event("task_started", "1970-01-01T00:16:10Z"),
+                event("task_complete", "1970-01-01T00:16:20Z"),
+            ),
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+
+        self.assertEqual(codex.find_active_session(sessions, "active", 1000, 30)["sessionId"], "active")
+        self.assertIsNone(codex.find_active_session(sessions, "complete", 1000, 30))
+        self.assertIsNone(codex.find_active_session(sessions, "active", 1000 + 86_400, 30))
+
+    def test_build_limited_queue_items_sets_codex_provider(self):
+        self.write_rollout(
+            records=(event("error", "1970-01-01T00:16:20Z", codex_error_info="usage_limit_exceeded"),)
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        affected = codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+        )
+
+        self.assertEqual(affected, items)
+        self.assertEqual(items[0].provider, "codex")
+        self.assertEqual(items[0].session_id, "codex-1")
+
+    def test_codex_dry_run_uses_exec_resume(self):
+        item = QueueItem(cwd="/tmp/repo", session_id="codex-1", provider="codex")
+
+        result = codex.run_due_item(
+            item,
+            now=1000,
+            codex_bin="codex",
+            dry_run=True,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+            resume_timeout_seconds=7200,
+        )
+
+        self.assertIn("DRY RUN: codex exec resume codex-1", result.last_output)

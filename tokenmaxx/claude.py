@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
-import signal
-import subprocess
 from pathlib import Path
 
 from .config import DEFAULT_PROMPT
-from .queue import QueueItem, apply_limit_event, classify_output, is_due, update_item_after_output
+from .queue import QueueItem, apply_limit_event, classify_output
+from .runner import run_due_command
 from .transcript import record_timestamp, tail_records as transcript_tail_records
 
 
@@ -157,50 +155,6 @@ def build_resume_command(item: QueueItem, claude_bin: str, prompt: str = DEFAULT
     return [claude_bin, "--resume", item.session_id, "-p", prompt]
 
 
-def dry_run_output(command: list[str]) -> str:
-    return "DRY RUN: " + " ".join(shlex.quote(part) for part in command)
-
-
-def terminate_process_group(process: subprocess.Popen[str], *, grace_seconds: int = 5) -> None:
-    try:
-        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-    except (AttributeError, ProcessLookupError, PermissionError, OSError):
-        process.terminate()
-    try:
-        process.communicate(timeout=grace_seconds)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-    except (AttributeError, ProcessLookupError, PermissionError, OSError):
-        process.kill()
-    process.communicate()
-
-
-def run_resume_command(command: list[str], *, cwd: str, timeout_seconds: int) -> tuple[int, str]:
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout_seconds if timeout_seconds > 0 else None)
-    except subprocess.TimeoutExpired as exc:
-        terminate_process_group(process)
-        partial = "\n".join(
-            part.decode(errors="replace") if isinstance(part, bytes) else part
-            for part in (exc.stdout, exc.stderr)
-            if part
-        )
-        message = f"tokenmaxx: claude resume timed out after {timeout_seconds} seconds"
-        return 124, "\n".join(part for part in (partial, message) if part)
-    return process.returncode or 0, "\n".join(part for part in (stdout, stderr) if part)
-
-
 def run_due_item(
     item: QueueItem,
     *,
@@ -212,21 +166,15 @@ def run_due_item(
     max_attempts: int,
     resume_timeout_seconds: int,
 ) -> QueueItem:
-    if not is_due(item, now):
-        return item
     command = build_resume_command(item, claude_bin, DEFAULT_PROMPT)
-    if dry_run:
-        item.last_output = dry_run_output(command)
-        item.updated_at = now
-        return item
-    returncode, output = run_resume_command(command, cwd=item.cwd, timeout_seconds=resume_timeout_seconds)
-    if returncode != 0 and not output:
-        output = f"claude exited with code {returncode}"
-    return update_item_after_output(
+    return run_due_command(
         item,
-        output,
+        command,
+        provider_name="claude",
         now=now,
+        dry_run=dry_run,
         retry_delay_seconds=retry_delay_seconds,
         followup_delay_seconds=followup_delay_seconds,
         max_attempts=max_attempts,
+        resume_timeout_seconds=resume_timeout_seconds,
     )

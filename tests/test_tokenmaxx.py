@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
-from tokenmaxx import claude, cli, launchd
+from tokenmaxx import claude, cli, launchd, runner
 from tokenmaxx.queue import (
     QueueItem,
     append_queue_item,
@@ -168,6 +168,17 @@ class TokenmaxxTests(unittest.TestCase):
         )
         self.assertEqual(reset_limited.status, "pending")
         self.assertEqual(reset_limited.next_attempt_at, int(datetime(2026, 6, 23, 17, 11, tzinfo=mexico).timestamp()))
+
+        codex_limited = update_item_after_output(
+            QueueItem(cwd="/tmp/repo", session_id="codex-1", provider="codex"),
+            "You've hit your usage limit. Try again at 12:52 AM.",
+            now=now,
+            retry_delay_seconds=18_000,
+            followup_delay_seconds=900,
+            max_attempts=3,
+        )
+        self.assertEqual(codex_limited.status, "pending")
+        self.assertEqual(codex_limited.next_attempt_at, int(datetime(2026, 6, 24, 0, 53, tzinfo=mexico).timestamp()))
 
         temporary_limited = update_item_after_output(
             QueueItem(cwd="/tmp/repo", session_id="abc"),
@@ -501,9 +512,9 @@ class TokenmaxxTests(unittest.TestCase):
         fake_os = types.SimpleNamespace(killpg=Mock(), getpgid=Mock(return_value=9876))
         fake_signal = types.SimpleNamespace(SIGTERM=15, SIGKILL=9)
 
-        with patch("tokenmaxx.claude.subprocess.Popen", return_value=process) as popen, patch.object(
-            claude, "os", fake_os, create=True
-        ), patch.object(claude, "signal", fake_signal, create=True):
+        with patch("tokenmaxx.runner.subprocess.Popen", return_value=process) as popen, patch.object(
+            runner, "os", fake_os, create=True
+        ), patch.object(runner, "signal", fake_signal, create=True):
             try:
                 result = claude.run_due_item(
                     item,
