@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokenmaxx"
-version = "0.4.0"
-description = "Limit-aware resume queue for Claude Code sessions"
+version = "0.5.0"
+description = "Limit-aware resume queue for Claude Code and Codex sessions"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
   { name = "Tokenmaxx contributors" }
 ]
-keywords = ["claude-code", "automation", "cli", "queue", "resume"]
+keywords = ["claude-code", "codex", "automation", "cli", "queue", "resume"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

@@ -27,7 +27,7 @@ python3 -m unittest discover -s tests -v
 Use a bytecode cache outside the repository:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py tests/test_tokenmaxx.py
+PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py tests/*.py
 ```
 
 ## CLI Smoke
@@ -37,9 +37,11 @@ python3 -m tokenmaxx --help
 python3 -m tokenmaxx scan --help
 python3 -m tokenmaxx autoqueue --help
 python3 -m tokenmaxx drop --help
+python3 -m tokenmaxx add --provider codex --session-id codex-demo --cwd /tmp/tokenmaxx-demo
+python3 -m tokenmaxx drop --provider codex --session-id codex-demo
 python3 -m tokenmaxx watch --once --dry-run --no-auto-queue --queue /tmp/tokenmaxx-smoke-queue.jsonl
 python3 -m tokenmaxx start --help
-python3 -m tokenmaxx launchd-install --dry-run --claude-bin /usr/local/bin/claude
+python3 -m tokenmaxx launchd-install --dry-run --claude-bin /usr/local/bin/claude --codex-bin /opt/homebrew/bin/codex
 python3 -m tokenmaxx stop --help
 python3 -m tokenmaxx logs --help
 ```
@@ -67,6 +69,7 @@ launchctl print gui/$(id -u)/com.local.tokenmaxx
 ```bash
 git status --short
 git diff --check
+bash .agents/skills/deepworkplan/verify/conformance.sh --repo-only
 ```
 
 ## Not Configured Yet

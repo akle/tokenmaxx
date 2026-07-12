@@ -8,43 +8,58 @@ entry point is the `tokenmaxx` console script defined in `pyproject.toml`, and
 
 ```text
 tokenmaxx/
-|-- cli.py       # argparse commands and user-facing output
-|-- claude.py    # Claude Code session discovery, transcript checks, resume calls
-|-- queue.py     # QueueItem model, JSONL persistence, locking, classification
-|-- launchd.py   # macOS LaunchAgent plist generation and launchctl wrappers
-|-- config.py    # default paths, timings, and guarded resume prompt
-|-- __main__.py  # python -m tokenmaxx entry point
-`-- __init__.py  # package version
+|-- cli.py        # argparse commands, provider dispatch, and user-facing output
+|-- claude.py     # Claude discovery, limit/activity checks, resume command
+|-- codex.py      # Codex discovery, limit/activity checks, resume command
+|-- transcript.py # bounded JSONL tail reading and timestamp parsing
+|-- runner.py     # shared subprocess execution, timeout, and result handling
+|-- queue.py      # queue model, persistence, locking, and classification
+|-- launchd.py    # macOS LaunchAgent plist generation and launchctl wrappers
+|-- config.py     # provider paths, timings, and guarded prompts
+|-- __main__.py   # python -m tokenmaxx entry point
+`-- __init__.py   # package version
 ```
 
 ## Runtime Data Flow
 
-1. `tokenmaxx autoqueue` or `tokenmaxx watch` reads session metadata from
-   `~/.claude/sessions`.
-2. For each recent session, `claude.find_transcript` looks for a matching JSONL
-   transcript under `~/.claude/projects`.
-3. `claude.session_limit_hit_at` walks the transcript tail records from the end
+1. `tokenmaxx autoqueue` or `tokenmaxx watch` scans both providers by default:
+   Claude metadata under `~/.claude/sessions` and Codex rollouts under
+   `~/.codex/sessions`.
+2. For each recent Claude session, `claude.find_transcript` looks for a matching
+   JSONL transcript under `~/.claude/projects`. Codex metadata and events share
+   one rollout file: discovery reads forward to its `session_meta`, then
+   `transcript.tail_records` bounds the event-tail reads for detection and
+   activity checks.
+3. `claude.session_limit_hit_at` walks Claude transcript tail records from the end
    and reports a limit (with the banner's timestamp) only when the last
    assistant activity is a synthetic limit banner
    (`message.model == "<synthetic>"`, classified by `queue.classify_output`).
    Regular messages that merely mention limit phrases never queue a session,
    and a real assistant record after the banner means the session already
    resumed.
-4. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
+4. `codex.session_limit_hit_at` accepts only a terminal provider-authored
+   `event_msg` error with structured code `usage_limit_exceeded`, or the exact
+   provider usage-limit prefix when the structured code is absent. Generic
+   errors and ordinary text are ignored; a later task start suppresses an old
+   limit.
+5. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
    A session with an existing `done`/`blocked` row is re-armed (pending, fresh
    attempts) when its banner is newer than the row's last update — a new limit
    event after the row was resolved. Rows dropped by the user are never
    re-armed.
-5. `tokenmaxx watch` picks one due queue item per cycle. If the session is still
-   active in a live Claude Code process (busy, or updated within the last 30
-   minutes, with an alive pid), the item is deferred by the follow-up delay
-   without consuming an attempt.
-6. Otherwise `watch` writes a lease on the item (its `nextAttemptAt` is pushed
-   past the resume timeout), releases the queue lock, and
-   `claude.run_due_item` runs `claude --resume <session-id> -p <guarded prompt>`
+6. `tokenmaxx watch` picks one due queue item per cycle. Provider-specific
+   activity checks defer active sessions without consuming an attempt: Claude
+   uses live process and metadata state, while Codex uses recent rollout task
+   state.
+7. A nonblocking `queue.jsonl.resume.lock` admits only one continuation across
+   both providers and all watchers. `watch` then writes a lease on the item (its
+   `nextAttemptAt` is pushed past the resume timeout), releases the queue lock,
+   and
+   the provider wrapper runs `claude --resume <session-id> -p <guarded prompt>`
+   or `codex exec resume <session-id> <guarded prompt>` through `runner.py`
    outside the lock so `status`, `add`, and `drop` stay usable during a resume.
    Dry runs stay under the lock and mutate nothing but cosmetic fields.
-7. `queue.update_item_after_output` records the result and
+8. `queue.update_item_after_output` records the result and
    `queue.merge_resumed_item` folds it back into a freshly loaded queue; a row
    resolved mid-resume (for example `tokenmaxx drop`) wins over the resume
    result. If the process dies mid-resume, the lease expires and the item
@@ -57,6 +72,7 @@ The queue is JSONL for inspectability and recovery. Each line maps to
 
 - `cwd`
 - `sessionId`
+- `provider` (`claude` or `codex`)
 - `status`
 - `nextAttemptAt`
 - `attempts`
@@ -65,7 +81,12 @@ The queue is JSONL for inspectability and recovery. Each line maps to
 - `createdAt`
 - `updatedAt`
 
-Writes use a sibling `queue.jsonl.lock` file. On macOS and Linux the lock uses
+Identity is `(provider, sessionId)`. Existing rows without `provider` load as
+Claude rows, preserving queues created before version 0.5.0. New rows always
+serialize the provider, and status displays it.
+
+Writes use a sibling `queue.jsonl.lock` file; continuations use the separate
+global `queue.jsonl.resume.lock`. On macOS and Linux each lock uses
 `fcntl.flock`; on platforms without `fcntl`, the context manager still preserves
 the write path but does not provide OS-level mutual exclusion.
 
@@ -78,7 +99,8 @@ the write path but does not provide OS-level mutual exclusion.
 - non-retryable output: prompt/context length failures;
 - completion output: `DONE`, `STATUS: DONE`, or Markdown-wrapped variants.
 
-When Claude prints a reset time such as `resets 5:10pm
+When either provider prints a reset time such as `resets 5:10pm` or `try again
+at 5:10pm
 (America/Mexico_City)`, `reset_time_from_output` schedules the next attempt one
 minute after that reset time.
 
@@ -93,9 +115,10 @@ macOS background operation uses launchd:
 - `tokenmaxx status` reports both launchd state and queue state.
 - `tokenmaxx logs` prints or follows the configured log file.
 
-The daemon command is a normal `tokenmaxx watch` invocation with queue, sessions,
-projects, lock timeout, interval, and `--claude-bin` arguments recorded in the
-plist. The Claude executable is resolved at install/start time because launchd
+The daemon command is a normal `tokenmaxx watch` invocation with queue, Claude
+sessions/projects, Codex sessions, lock timeout, interval, and all available
+`--claude-bin` and `--codex-bin` arguments recorded in the plist. Provider
+executables are resolved at install/start time because launchd
 does not inherit the user's interactive shell PATH. The invoking shell's `PATH`
 is also embedded in the plist's `EnvironmentVariables`, because version-manager
 shims (asdf, mise) exec their manager binary from PATH and die under launchd's
@@ -103,9 +126,13 @@ bare system PATH otherwise.
 
 ## Failure Boundaries
 
-- If no Claude session metadata exists, scans return an empty list.
-- Invalid session JSON is skipped.
+- If one provider has no session data or executable, the other still operates.
+- Invalid Claude metadata and malformed or disappearing Codex rollouts are
+  skipped.
 - Invalid queue JSON fails loudly with the queue line number.
 - Resume subprocesses run in a new process group and are killed on timeout.
-- Unknown Claude output is retried after the follow-up delay until attempts are
+- Unknown provider output is retried after the follow-up delay until attempts are
   exhausted.
+- Unknown queue providers fail closed and are never dispatched.
+- Provider commands inherit normal user configuration; tokenmaxx passes no
+  sandbox, approval, permission, or bypass flags.

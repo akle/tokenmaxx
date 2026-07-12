@@ -3,7 +3,8 @@
 ## Framework
 
 tokenmaxx uses Python's standard `unittest` framework. Tests live in
-`tests/test_tokenmaxx.py` and exercise the package modules directly.
+`tests/test_tokenmaxx.py` and `tests/test_codex.py` and exercise the package
+modules directly.
 
 ## Required Gate
 
@@ -16,7 +17,7 @@ python3 -m unittest discover -s tests -v
 Run syntax checks without writing bytecode into the repository:
 
 ```bash
-PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py tests/test_tokenmaxx.py
+PYTHONPYCACHEPREFIX=/tmp/tokenmaxx-pycache python3 -m py_compile tokenmaxx/*.py tests/*.py
 ```
 
 Run diff whitespace checks before committing:
@@ -33,6 +34,7 @@ CLI version and help:
 python3 -m tokenmaxx --version
 python3 -m tokenmaxx --help
 python3 -m tokenmaxx start --help
+python3 -m tokenmaxx autoqueue --help
 python3 -m tokenmaxx logs --help
 ```
 
@@ -54,11 +56,19 @@ python3 -m venv /tmp/tokenmaxx-venv
 
 - Tests should use `tempfile.TemporaryDirectory` for queues, sessions,
   transcripts, logs, and plists.
-- Patch subprocess calls for launchd and Claude invocation tests.
+- Patch subprocess calls for launchd, Claude Code, and Codex invocation tests.
 - Prefer tests that assert user-facing behavior: status text, queue state,
   plist arguments, and returned exit codes.
 - Add a failing test before changing queue classification, scheduling, launchd
   behavior, or resume subprocess handling.
+- Test shared execution behavior in `runner.py`, bounded JSONL reading in
+  `transcript.py`, and provider-specific discovery and detection in `claude.py`
+  or `codex.py`.
+- Build Codex fixtures from synthetic `session_meta`, `event_msg`, and turn
+  records using invented IDs and paths. Never copy records from private rollout
+  files, queues, or user sessions.
+- Cover positive structured Codex limit events and negative cases for generic
+  errors, ordinary text mentions, and later task starts.
 
 ## Coverage Expectations
 
@@ -67,6 +77,7 @@ Every behavior change should cover:
 - the direct function or command behavior;
 - one failure path when the behavior can fail;
 - queue state transitions when the behavior changes scheduling or status.
+- provider-qualified identity when rows can share a session ID.
 
 There is no coverage tool configured yet. Until one is added, the minimum bar is
 focused unit coverage plus the full test, syntax, and smoke gates above.
