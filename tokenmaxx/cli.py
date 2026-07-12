@@ -437,9 +437,13 @@ def cmd_launchd_install(args) -> int:
     if not program:
         print("tokenmaxx is not on PATH. Pass --program /absolute/path/to/tokenmaxx.", file=sys.stderr)
         return 1
-    claude_bin = resolve_default_claude_bin(args.claude_bin)
-    if not claude_bin:
-        print("claude is not on PATH. Pass --claude-bin /absolute/path/to/claude.", file=sys.stderr)
+    claude_bin = resolve_provider_bin("claude", args.claude_bin)
+    codex_bin = resolve_provider_bin("codex", args.codex_bin)
+    if not claude_bin and not codex_bin:
+        print(
+            "Neither claude nor codex is on PATH. Pass --claude-bin or --codex-bin with an absolute path.",
+            file=sys.stderr,
+        )
         return 1
     queue_path = args.queue.expanduser()
     log_path = args.log_path.expanduser()
@@ -447,10 +451,12 @@ def cmd_launchd_install(args) -> int:
     plist = build_launchd_plist(
         program=program,
         claude_bin=claude_bin,
+        codex_bin=codex_bin,
         queue_path=queue_path,
         log_path=log_path,
         interval_seconds=args.interval_seconds,
         sessions_dir=args.sessions_dir,
+        codex_sessions_dir=args.codex_sessions_dir,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
         path_env=os.environ.get("PATH"),
@@ -486,10 +492,11 @@ def cmd_start(args) -> int:
             file=sys.stderr,
         )
         return 1
-    claude_bin = resolve_default_claude_bin(args.claude_bin)
-    if not claude_bin:
+    claude_bin = resolve_provider_bin("claude", args.claude_bin)
+    codex_bin = resolve_provider_bin("codex", args.codex_bin)
+    if not claude_bin and not codex_bin:
         print(
-            "claude is not on PATH. Run `tokenmaxx start --claude-bin /absolute/path/to/claude`.",
+            "Neither claude nor codex is on PATH. Pass --claude-bin or --codex-bin with an absolute path.",
             file=sys.stderr,
         )
         return 1
@@ -500,10 +507,12 @@ def cmd_start(args) -> int:
     plist = build_launchd_plist(
         program=program,
         claude_bin=claude_bin,
+        codex_bin=codex_bin,
         queue_path=queue_path,
         log_path=log_path,
         interval_seconds=args.interval_seconds,
         sessions_dir=args.sessions_dir,
+        codex_sessions_dir=args.codex_sessions_dir,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
         path_env=os.environ.get("PATH"),
@@ -651,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(start)
     start.add_argument("--program", default=None, help="absolute tokenmaxx executable path for launchd")
     start.add_argument("--claude-bin", default=None, help="Claude executable path for launchd")
+    start.add_argument("--codex-bin", default=None, help="Codex executable path for launchd")
     start.add_argument("--plist-path", type=Path, default=default_plist_path())
     start.add_argument("--log-path", type=Path, default=default_log_path())
     start.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)
@@ -673,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(launchd_install)
     launchd_install.add_argument("--program", default=None, help="absolute tokenmaxx executable path for launchd")
     launchd_install.add_argument("--claude-bin", default=None, help="Claude executable path for launchd")
+    launchd_install.add_argument("--codex-bin", default=None, help="Codex executable path for launchd")
     launchd_install.add_argument("--plist-path", type=Path, default=default_plist_path())
     launchd_install.add_argument("--log-path", type=Path, default=default_log_path())
     launchd_install.add_argument("--interval-seconds", type=int, default=DEFAULT_INTERVAL_SECONDS)

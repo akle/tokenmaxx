@@ -1016,10 +1016,12 @@ class TokenmaxxTests(unittest.TestCase):
         plist = launchd.build_launchd_plist(
             program="/usr/local/bin/tokenmaxx",
             claude_bin="/usr/local/bin/claude",
+            codex_bin="/opt/homebrew/bin/codex",
             queue_path=Path("/tmp/queue.jsonl"),
             log_path=Path("/tmp/tokenmaxx.log"),
             interval_seconds=300,
             sessions_dir=Path("/tmp/sessions"),
+            codex_sessions_dir=Path("/tmp/codex-sessions"),
             projects_dir=Path("/tmp/projects"),
             lock_timeout_seconds=7,
         )
@@ -1027,10 +1029,14 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>watch</string>", plist)
         self.assertIn("<string>--claude-bin</string>", plist)
         self.assertIn("<string>/usr/local/bin/claude</string>", plist)
+        self.assertIn("<string>--codex-bin</string>", plist)
+        self.assertIn("<string>/opt/homebrew/bin/codex</string>", plist)
         self.assertIn("<string>--queue</string>", plist)
         self.assertIn("<string>/tmp/queue.jsonl</string>", plist)
         self.assertIn("<string>--sessions-dir</string>", plist)
         self.assertIn("<string>/tmp/sessions</string>", plist)
+        self.assertIn("<string>--codex-sessions-dir</string>", plist)
+        self.assertIn("<string>/tmp/codex-sessions</string>", plist)
         self.assertIn("<string>--projects-dir</string>", plist)
         self.assertIn("<string>/tmp/projects</string>", plist)
         self.assertIn("<string>--lock-timeout-seconds</string>", plist)
@@ -1040,6 +1046,7 @@ class TokenmaxxTests(unittest.TestCase):
         plist = launchd.build_launchd_plist(
             program="/usr/local/bin/tokenmaxx",
             claude_bin="/usr/local/bin/claude",
+            codex_bin=None,
             queue_path=Path("/tmp/queue.jsonl"),
             log_path=Path("/tmp/tokenmaxx.log"),
             interval_seconds=300,
@@ -1167,7 +1174,9 @@ class TokenmaxxTests(unittest.TestCase):
 
     def test_launchd_install_dry_run_prints_plist_without_writing(self):
         output = io.StringIO()
-        with redirect_stdout(output):
+        with patch(
+            "tokenmaxx.cli.resolve_provider_bin", side_effect=["/usr/local/bin/claude", None]
+        ), redirect_stdout(output):
             code = cli.cmd_launchd_install(self.args(claude_bin="/usr/local/bin/claude", dry_run=True))
         self.assertEqual(code, 0)
         self.assertIn("com.local.tokenmaxx", output.getvalue())
@@ -1198,7 +1207,7 @@ class TokenmaxxTests(unittest.TestCase):
             plist_path=self.root / "agents" / "com.local.tokenmaxx.plist",
         )
         with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
-            "tokenmaxx.cli.resolve_default_claude_bin", return_value="/usr/local/bin/claude"
+            "tokenmaxx.cli.resolve_provider_bin", side_effect=["/usr/local/bin/claude", None]
         ), patch(
             "tokenmaxx.launchd.subprocess.run", side_effect=fake_run
         ), redirect_stdout(output):
@@ -1214,6 +1223,45 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<key>PATH</key>", args.plist_path.read_text())
         self.assertIn("Started com.local.tokenmaxx", output.getvalue())
         self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
+
+    def test_start_writes_plist_when_only_codex_resolves(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[:2] == ["launchctl", "print"]:
+                return subprocess.CompletedProcess(command, 3, "", "not loaded")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        output = io.StringIO()
+        args = self.args(
+            program=None,
+            claude_bin=None,
+            codex_bin=None,
+            plist_path=self.root / "agents" / "com.local.tokenmaxx.plist",
+        )
+        with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
+            "tokenmaxx.cli.resolve_provider_bin", side_effect=[None, "/opt/homebrew/bin/codex"]
+        ), patch("tokenmaxx.launchd.subprocess.run", side_effect=fake_run), redirect_stdout(output):
+            code = cli.cmd_start(args)
+
+        self.assertEqual(code, 0)
+        plist = args.plist_path.read_text()
+        self.assertNotIn("<string>--claude-bin</string>", plist)
+        self.assertIn("<string>--codex-bin</string>", plist)
+        self.assertIn("<string>/opt/homebrew/bin/codex</string>", plist)
+        self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
+
+    def test_start_requires_at_least_one_provider_executable(self):
+        error = io.StringIO()
+
+        with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
+            "tokenmaxx.cli.resolve_provider_bin", return_value=None
+        ), redirect_stderr(error):
+            code = cli.cmd_start(self.args(claude_bin=None, codex_bin=None))
+
+        self.assertEqual(code, 1)
+        self.assertIn("Neither claude nor codex is on PATH", error.getvalue())
 
     def test_start_warns_when_loaded_service_keeps_old_arguments(self):
         calls = []
@@ -1232,7 +1280,7 @@ class TokenmaxxTests(unittest.TestCase):
         args.plist_path.write_text("<plist>old</plist>")
 
         with patch("tokenmaxx.cli.resolve_default_program", return_value="/usr/local/bin/tokenmaxx"), patch(
-            "tokenmaxx.cli.resolve_default_claude_bin", return_value="/usr/local/bin/claude"
+            "tokenmaxx.cli.resolve_provider_bin", side_effect=["/usr/local/bin/claude", None]
         ), patch(
             "tokenmaxx.launchd.subprocess.run", side_effect=fake_run
         ), redirect_stdout(output):

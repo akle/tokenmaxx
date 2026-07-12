@@ -19,27 +19,29 @@ class LaunchdState:
 
 def build_launchd_plist(
     program: str,
-    claude_bin: str,
+    claude_bin: str | None,
+    codex_bin: str | None,
     queue_path: Path,
     log_path: Path,
     interval_seconds: int,
     sessions_dir: Path | None = None,
+    codex_sessions_dir: Path | None = None,
     projects_dir: Path | None = None,
     lock_timeout_seconds: int | None = None,
     path_env: str | None = None,
 ) -> str:
-    arguments = [
-        program,
-        "watch",
-        "--claude-bin",
-        str(Path(claude_bin).expanduser()),
-        "--queue",
-        str(Path(queue_path).expanduser()),
-        "--sleep-seconds",
-        str(interval_seconds),
-    ]
+    arguments = [program, "watch"]
+    if claude_bin:
+        arguments.extend(["--claude-bin", str(Path(claude_bin).expanduser())])
+    if codex_bin:
+        arguments.extend(["--codex-bin", str(Path(codex_bin).expanduser())])
+    arguments.extend(
+        ["--queue", str(Path(queue_path).expanduser()), "--sleep-seconds", str(interval_seconds)]
+    )
     if sessions_dir is not None:
         arguments.extend(["--sessions-dir", str(Path(sessions_dir).expanduser())])
+    if codex_sessions_dir is not None:
+        arguments.extend(["--codex-sessions-dir", str(Path(codex_sessions_dir).expanduser())])
     if projects_dir is not None:
         arguments.extend(["--projects-dir", str(Path(projects_dir).expanduser())])
     if lock_timeout_seconds is not None:
