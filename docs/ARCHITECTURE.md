@@ -22,9 +22,10 @@ tokenmaxx/
 
 ## Runtime Data Flow
 
-1. `tokenmaxx autoqueue` or `tokenmaxx watch` scans both providers by default:
-   Claude metadata under `~/.claude/sessions` and Codex rollouts under
-   `~/.codex/sessions`.
+1. `tokenmaxx autoqueue` scans both providers: Claude metadata under
+   `~/.claude/sessions` and Codex rollouts under `~/.codex/sessions`. When
+   auto-queue is enabled, `tokenmaxx watch` scans only providers whose
+   executables resolved for that invocation.
 2. For each recent Claude session, `claude.find_transcript` looks for a matching
    JSONL transcript under `~/.claude/projects`. Codex metadata and events share
    one rollout file: discovery reads forward to its `session_meta`, then
