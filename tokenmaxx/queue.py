@@ -58,6 +58,7 @@ class QueueItem:
     blocked_reason: str = ""
     created_at: int = 0
     updated_at: int = 0
+    lease_id: str = ""
 
     def __post_init__(self) -> None:
         if self.provider not in SUPPORTED_PROVIDERS:
@@ -67,6 +68,7 @@ class QueueItem:
         self.attempts = int(self.attempts or 0)
         self.created_at = int(self.created_at or now)
         self.updated_at = int(self.updated_at or self.created_at)
+        self.lease_id = str(self.lease_id or "")
 
     @classmethod
     def from_dict(cls, data: dict) -> "QueueItem":
@@ -81,6 +83,7 @@ class QueueItem:
             blocked_reason=str(data.get("blockedReason") or data.get("blocked_reason") or ""),
             created_at=int(data.get("createdAt") or data.get("created_at") or 0),
             updated_at=int(data.get("updatedAt") or data.get("updated_at") or 0),
+            lease_id=str(data.get("leaseId") or data.get("lease_id") or ""),
         )
 
     def to_dict(self) -> dict:
@@ -95,6 +98,7 @@ class QueueItem:
             "blockedReason": self.blocked_reason,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
+            "leaseId": self.lease_id,
         }
 
     @property
@@ -282,14 +286,18 @@ def merge_resumed_item(items: list[QueueItem], updated: QueueItem) -> None:
     """Fold the result of an out-of-lock resume back into a reloaded queue.
 
     The result lands on the first still-pending row for the provider/session — the row
-    that carried the lease. Provider/session matching keeps identically named
+    that carried the same lease. Provider/session matching keeps identically named
     sessions isolated, while still skipping a blocked tombstone when the same
-    provider session was re-added after a drop. No pending row means the item
-    was resolved mid-resume (dropped, or deleted manually); that decision wins
-    and the resume result is discarded.
+    provider session was re-added after a drop. No matching pending row means the
+    item was resolved or re-armed mid-resume; that newer decision wins and the
+    resume result is discarded.
     """
     for index, existing in enumerate(items):
-        if existing.key == updated.key and existing.status == "pending":
+        if (
+            existing.key == updated.key
+            and existing.status == "pending"
+            and existing.lease_id == updated.lease_id
+        ):
             items[index] = updated
             return
 
@@ -321,6 +329,7 @@ def apply_limit_event(
     existing.blocked_reason = ""
     existing.last_output = ""
     existing.updated_at = now
+    existing.lease_id = ""
     return existing
 
 

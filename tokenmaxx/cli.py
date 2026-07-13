@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 from . import __version__, claude, codex
@@ -128,6 +129,7 @@ def cmd_add(args) -> int:
                 existing.last_output = ""
                 existing.blocked_reason = ""
                 existing.updated_at = item.updated_at
+                existing.lease_id = ""
         else:
             items.append(item)
         write_queue(args.queue, items)
@@ -298,6 +300,7 @@ def cmd_drop(args) -> int:
                 item.blocked_reason = "dropped by user"
                 item.next_attempt_at = 0
                 item.updated_at = now
+                item.lease_id = ""
         write_queue(args.queue, items)
     identity = session_id if args.provider is None and provider == "claude" else f"{provider}:{session_id}"
     print(f"Dropped {identity}. Kept as a blocked tombstone so auto-queue will not re-add it.")
@@ -400,6 +403,7 @@ def run_watch_cycle(args, bins: dict[str, str]) -> bool:
             # add, and drop stay usable during a resume that can run for hours.
             # The queue-scoped resume lock still prevents another watcher from
             # claiming a different provider row concurrently.
+            item.lease_id = uuid.uuid4().hex
             resume_item = dataclasses.replace(item)
             lease_seconds = args.resume_timeout_seconds if args.resume_timeout_seconds > 0 else 86_400
             item.next_attempt_at = now + lease_seconds + 300

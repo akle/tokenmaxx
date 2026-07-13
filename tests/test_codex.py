@@ -56,6 +56,16 @@ class CodexTests(unittest.TestCase):
 
         self.assertEqual([row["sessionId"] for row in sessions], ["codex-1"])
 
+    def test_load_codex_sessions_skips_invalid_utf8_rollout(self):
+        path = self.root / "invalid-utf8.jsonl"
+        path.write_bytes(b"\xff\xfe\n")
+        os.utime(path, (1000, 1000))
+
+        self.assertEqual(
+            codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1),
+            [],
+        )
+
     def test_load_codex_sessions_rejects_invalid_id_and_cwd_values(self):
         cases = (
             ("empty-id", "", "/tmp/repo"),

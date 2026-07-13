@@ -28,7 +28,7 @@ def load_codex_sessions(
             updated_at = path.stat().st_mtime
             if now - updated_at > max_age_seconds:
                 continue
-            with path.open() as handle:
+            with path.open(encoding="utf-8", errors="replace") as handle:
                 for line in handle:
                     record = json.loads(line)
                     if not isinstance(record, dict):
@@ -51,7 +51,7 @@ def load_codex_sessions(
                         }
                     )
                     break
-        except (FileNotFoundError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError):
             continue
     return sorted(sessions, key=lambda item: item["updatedAt"], reverse=True)
 

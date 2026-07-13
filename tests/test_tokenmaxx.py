@@ -124,12 +124,13 @@ class TokenmaxxTests(unittest.TestCase):
         return path
 
     def test_queue_round_trip_and_status_helpers(self):
-        item = QueueItem(cwd="/tmp/repo", session_id="abc", next_attempt_at=200)
+        item = QueueItem(cwd="/tmp/repo", session_id="abc", next_attempt_at=200, lease_id="lease-1")
         append_queue_item(self.queue_path, item)
 
         loaded = load_queue(self.queue_path)
         self.assertEqual(loaded[0].cwd, "/tmp/repo")
         self.assertEqual(loaded[0].session_id, "abc")
+        self.assertEqual(loaded[0].lease_id, "lease-1")
         self.assertFalse(is_due(loaded[0], now=100))
         self.assertTrue(is_due(loaded[0], now=200))
         self.assertEqual(queue_lock_path(self.queue_path), self.root / "queue.jsonl.lock")
@@ -381,6 +382,7 @@ class TokenmaxxTests(unittest.TestCase):
                 next_attempt_at=1234,
                 last_output="old output",
                 blocked_reason="dropped by user",
+                lease_id="old-lease",
             ),
         )
 
@@ -395,6 +397,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(items[0].next_attempt_at, 0)
         self.assertEqual(items[0].last_output, "")
         self.assertEqual(items[0].blocked_reason, "")
+        self.assertEqual(items[0].lease_id, "")
 
     def test_scan_lists_both_providers(self):
         self.write_session(
@@ -653,7 +656,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("watching", output.getvalue())
 
     def test_watch_dry_run_prints_generated_command(self):
-        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc", lease_id="running"))
         output = io.StringIO()
         with redirect_stdout(output):
             code = cli.cmd_watch(self.args(dry_run=True))
@@ -1120,7 +1123,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>/opt/custom/bin:/usr/bin:/bin</string>", plist)
 
     def test_drop_tombstones_queue_item(self):
-        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc"))
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc", lease_id="running"))
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="keep"))
 
         output = io.StringIO()
@@ -1132,6 +1135,7 @@ class TokenmaxxTests(unittest.TestCase):
         dropped, kept = load_queue(self.queue_path)
         self.assertEqual(dropped.status, "blocked")
         self.assertEqual(dropped.blocked_reason, "dropped by user")
+        self.assertEqual(dropped.lease_id, "")
         self.assertFalse(is_due(dropped))
         self.assertEqual(kept.status, "pending")
 
@@ -1182,6 +1186,7 @@ class TokenmaxxTests(unittest.TestCase):
 
         def fake_run(item, **kwargs):
             observed["item"] = item
+            updated.lease_id = item.lease_id
             with queue_module.resume_lock(self.queue_path) as resume_lock_acquired:
                 observed["resume_lock_acquired"] = resume_lock_acquired
             with queue_module.queue_lock(self.queue_path, timeout_seconds=0):
@@ -1194,6 +1199,7 @@ class TokenmaxxTests(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertTrue(is_due(observed["item"], now))
+        self.assertTrue(observed["item"].lease_id)
         self.assertFalse(observed["resume_lock_acquired"])
         lease_row = observed["queue_at_resume"][0]
         self.assertEqual(lease_row.status, "pending")
@@ -1226,6 +1232,15 @@ class TokenmaxxTests(unittest.TestCase):
         deleted: list[QueueItem] = []
         merge_resumed_item(deleted, done)
         self.assertEqual(deleted, [])
+
+    def test_stale_resume_cannot_overwrite_rearmed_queue_item(self):
+        rearmed = [QueueItem(cwd="/tmp/repo", session_id="abc", status="pending", lease_id="fresh")]
+        stale = QueueItem(cwd="/tmp/repo", session_id="abc", status="done", lease_id="stale")
+
+        merge_resumed_item(rearmed, stale)
+
+        self.assertEqual(rearmed[0].status, "pending")
+        self.assertEqual(rearmed[0].lease_id, "fresh")
 
     def test_main_reports_locked_queue_without_traceback(self):
         error = io.StringIO()
