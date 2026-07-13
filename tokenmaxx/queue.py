@@ -71,7 +71,7 @@ class QueueItem:
         self.updated_at = int(self.updated_at or self.created_at)
         self.lease_id = str(self.lease_id or "")
         try:
-            self.lease_pid = int(self.lease_pid or 0)
+            self.lease_pid = max(0, int(self.lease_pid or 0))
         except (TypeError, ValueError):
             self.lease_pid = 0
 

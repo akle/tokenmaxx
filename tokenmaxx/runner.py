@@ -37,16 +37,19 @@ def run_resume_command(
     provider_name: str,
     on_process_start=None,
 ) -> tuple[int, str]:
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return 127, f"tokenmaxx: {provider_name} failed to start: {exc}"
     try:
         if on_process_start is not None:
             on_process_start(process.pid)

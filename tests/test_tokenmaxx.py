@@ -143,6 +143,9 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertTrue(is_due(loaded[0], now=200))
         self.assertEqual(queue_lock_path(self.queue_path), self.root / "queue.jsonl.lock")
 
+    def test_queue_normalizes_invalid_lease_pid(self):
+        self.assertEqual(QueueItem(cwd="/tmp/repo", session_id="abc", lease_pid=-1).lease_pid, 0)
+
     def test_queue_provider_migration_and_composite_identity(self):
         self.queue_path.write_text('{"cwd":"/tmp/r","sessionId":"same"}\n')
         legacy = load_queue(self.queue_path)[0]
@@ -360,6 +363,12 @@ class TokenmaxxTests(unittest.TestCase):
         sessions = claude.load_claude_sessions(self.sessions_dir)
 
         self.assertEqual([session["sessionId"] for session in sessions], ["good"])
+
+    def test_message_text_skips_non_string_content_parts(self):
+        self.assertEqual(
+            claude.message_text({"content": [{"text": "limit"}, {"text": 123}, {"text": None}]}),
+            "limit",
+        )
 
     def test_find_transcript_skips_file_deleted_mid_scan(self):
         project_dir = self.projects_dir / "project"
@@ -685,6 +694,28 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(result.status, "pending")
         self.assertEqual(result.next_attempt_at, 1900)
         self.assertIn("timed out after 5 seconds", result.last_output)
+
+    def test_run_due_item_handles_missing_working_directory(self):
+        item = QueueItem(cwd="/tmp/missing", session_id="abc")
+
+        with patch(
+            "tokenmaxx.runner.subprocess.Popen",
+            side_effect=FileNotFoundError(2, "No such file or directory", "/tmp/missing"),
+        ):
+            result = claude.run_due_item(
+                item,
+                now=1000,
+                claude_bin="claude",
+                dry_run=False,
+                retry_delay_seconds=18_000,
+                followup_delay_seconds=900,
+                max_attempts=3,
+                resume_timeout_seconds=5,
+            )
+
+        self.assertEqual(result.status, "pending")
+        self.assertEqual(result.attempts, 1)
+        self.assertIn("failed to start", result.last_output)
 
     def test_runner_replaces_invalid_provider_output(self):
         process = Mock()

@@ -63,7 +63,11 @@ def message_text(message: dict) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+        return " ".join(
+            part["text"]
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
     return ""
 
 

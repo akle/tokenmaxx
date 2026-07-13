@@ -21,7 +21,7 @@ def tail_records(path: Path, max_lines: int = 80) -> list[dict]:
                 chunk = handle.read(size)
                 chunks.append(chunk)
                 newline_count += chunk.count(b"\n")
-    except FileNotFoundError:
+    except OSError:
         return []
     lines = b"".join(reversed(chunks)).decode(errors="replace").splitlines()[-max_lines:]
     records: list[dict] = []

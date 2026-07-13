@@ -33,7 +33,7 @@ this turns into manual bookkeeping and unfinished work gets lost.
   files, identifying only provider-authored terminal limit signals.
 - Queue only sessions that look limited, not every idle or historical session.
 - Resume one due session at a time globally with `claude --resume` or
-  `codex exec resume`.
+  `codex exec resume --all`.
 - Classify resume output as done, limited, blocked, or unknown.
 - Back off until the reset time when either provider reports one.
 - Run as a macOS launchd background service with explicit `start`, `stop`,

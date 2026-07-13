@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tokenmaxx import codex
 from tokenmaxx.queue import QueueItem
@@ -33,6 +34,10 @@ class CodexTests(unittest.TestCase):
         path = self.root / "tail.jsonl"
         path.write_text('{"n":1}\nnot-json\n{"n":2}\n{"n":3}\n')
         self.assertEqual(tail_records(path, max_lines=2), [{"n": 2}, {"n": 3}])
+
+    def test_tail_records_skips_unreadable_file(self):
+        with patch("tokenmaxx.transcript.Path.open", side_effect=PermissionError):
+            self.assertEqual(tail_records(self.root / "unreadable.jsonl"), [])
 
     def test_load_codex_sessions_reads_recent_metadata(self):
         recent = self.write_rollout()
