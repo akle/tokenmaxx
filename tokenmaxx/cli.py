@@ -121,7 +121,14 @@ def cmd_add(args) -> int:
         if matches:
             existing = next((row for row in matches if row.status == "pending"), matches[0])
             items = [row for row in items if row.key != item.key or row is existing]
-            if existing.status != "pending":
+            if existing.status == "pending":
+                if args.cwd is not None:
+                    existing.cwd = item.cwd
+                    if existing.lease_id:
+                        existing.lease_id = ""
+                        existing.next_attempt_at = 0
+                        existing.updated_at = item.updated_at
+            else:
                 existing.cwd = item.cwd
                 existing.status = "pending"
                 existing.next_attempt_at = 0

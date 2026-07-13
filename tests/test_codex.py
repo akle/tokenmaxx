@@ -141,6 +141,17 @@ class CodexTests(unittest.TestCase):
 
         self.assertIsNone(codex.session_limit_hit_at(session))
 
+    def test_terminal_limit_error_is_not_an_active_session(self):
+        self.write_rollout(
+            records=(
+                event("task_started", "1970-01-01T00:15:00Z"),
+                event("error", "1970-01-01T00:16:20Z", codex_error_info="usage_limit_exceeded"),
+            )
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+
+        self.assertFalse(codex.session_is_active(session, now=1000, grace_seconds=30))
+
     def test_active_session_uses_newest_task_state_and_expires_after_a_day(self):
         self.write_rollout(
             session_id="active",

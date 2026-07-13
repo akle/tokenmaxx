@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import plistlib
 import re
 import subprocess
 import tempfile
@@ -337,12 +338,38 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(sessions[0]["sessionId"], "abc")
         self.assertEqual(sessions[0]["cwd"], "/tmp/repo")
 
+    def test_load_claude_sessions_skips_malformed_metadata(self):
+        (self.sessions_dir / "invalid-utf8.json").write_bytes(b"\xff\xfe\n")
+        (self.sessions_dir / "list.json").write_text("[]\n")
+        self.write_session(
+            "bad-updated.json",
+            {"pid": DEAD_PID, "status": "idle", "cwd": "/tmp/bad", "sessionId": "bad", "updatedAt": "nope"},
+        )
+        self.write_session(
+            "good.json",
+            {"pid": DEAD_PID, "status": "idle", "cwd": "/tmp/good", "sessionId": "good", "updatedAt": 999_000},
+        )
+
+        sessions = claude.load_claude_sessions(self.sessions_dir)
+
+        self.assertEqual([session["sessionId"] for session in sessions], ["good"])
+
     def test_add_writes_selected_session_to_queue(self):
         self.write_session("80544.json", {"pid": 80544, "status": "busy", "cwd": "/tmp/repo", "sessionId": "abc"})
         with redirect_stdout(io.StringIO()):
             code = cli.cmd_add(self.args(pid=80544))
         self.assertEqual(code, 0)
         self.assertEqual(load_queue(self.queue_path)[0].session_id, "abc")
+
+    def test_add_updates_existing_pending_item_cwd(self):
+        self.write_session("80544.json", {"pid": 80544, "status": "busy", "cwd": "/tmp/session", "sessionId": "abc"})
+        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/old", session_id="abc"))
+
+        with redirect_stdout(io.StringIO()):
+            code = cli.cmd_add(self.args(pid=80544, cwd="/tmp/override"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(load_queue(self.queue_path)[0].cwd, "/tmp/override")
 
     def test_add_writes_selected_codex_session_to_queue(self):
         self.write_codex_session("codex-abc")
@@ -644,6 +671,24 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(result.status, "pending")
         self.assertEqual(result.next_attempt_at, 1900)
         self.assertIn("timed out after 5 seconds", result.last_output)
+
+    def test_runner_replaces_invalid_provider_output(self):
+        process = Mock()
+        process.returncode = 1
+        process.communicate.return_value = ("\ufffd", "")
+
+        with patch("tokenmaxx.runner.subprocess.Popen", return_value=process) as popen:
+            returncode, output = runner.run_resume_command(
+                ["codex", "exec", "resume", "abc"],
+                cwd="/tmp/repo",
+                timeout_seconds=5,
+                provider_name="codex",
+            )
+
+        self.assertEqual(returncode, 1)
+        self.assertEqual(output, "\ufffd")
+        self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(popen.call_args.kwargs["errors"], "replace")
 
     def test_watch_loop_logs_startup_line(self):
         # once=False with an immediate-return side effect via sleep patch
@@ -1107,6 +1152,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>/tmp/projects</string>", plist)
         self.assertIn("<string>--lock-timeout-seconds</string>", plist)
         self.assertIn("<string>7</string>", plist)
+        self.assertTrue(plistlib.loads(plist.encode())["RunAtLoad"])
 
     def test_build_launchd_plist_embeds_path_environment(self):
         plist = launchd.build_launchd_plist(

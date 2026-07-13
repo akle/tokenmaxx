@@ -17,14 +17,22 @@ def load_claude_sessions(sessions_dir: Path) -> list[dict]:
     sessions: list[dict] = []
     for path in sessions_dir.glob("*.json"):
         try:
-            data = json.loads(path.read_text())
-        except FileNotFoundError:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeDecodeError):
             # Claude Code deletes session files on exit; this one vanished
             # between the glob and the read.
             continue
         except json.JSONDecodeError:
             continue
-        if not data.get("sessionId") or not data.get("cwd"):
+        if not isinstance(data, dict):
+            continue
+        if not isinstance(data.get("sessionId"), str) or not data.get("sessionId"):
+            continue
+        if not isinstance(data.get("cwd"), str) or not data.get("cwd"):
+            continue
+        try:
+            int(data.get("updatedAt") or 0)
+        except (TypeError, ValueError):
             continue
         data["_path"] = str(path)
         sessions.append(data)

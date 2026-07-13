@@ -12,6 +12,16 @@ from .transcript import record_timestamp, tail_records
 ACTIVE_STALENESS_SECONDS = 24 * 60 * 60
 
 
+def is_usage_limit_error(payload: dict) -> bool:
+    error_info = payload.get("codex_error_info")
+    message = payload.get("message")
+    return error_info == "usage_limit_exceeded" or (
+        error_info is None
+        and isinstance(message, str)
+        and message.startswith("You've hit your usage limit.")
+    )
+
+
 def load_codex_sessions(
     sessions_dir: Path,
     *,
@@ -77,13 +87,7 @@ def session_limit_hit_at(session: dict) -> int | None:
             continue
         if event_type != "error":
             continue
-        error_info = payload.get("codex_error_info")
-        message = payload.get("message")
-        if error_info == "usage_limit_exceeded" or (
-            error_info is None
-            and isinstance(message, str)
-            and message.startswith("You've hit your usage limit.")
-        ):
+        if is_usage_limit_error(payload):
             return record_timestamp(record)
         return None
     return None
@@ -139,6 +143,8 @@ def session_is_active(session: dict, now: int, grace_seconds: int) -> bool:
             continue
         event_type = payload.get("type")
         if event_type == "task_complete":
+            return False
+        if event_type == "error" and is_usage_limit_error(payload):
             return False
         if event_type == "task_started":
             return now - record_timestamp(record) < ACTIVE_STALENESS_SECONDS

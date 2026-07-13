@@ -53,7 +53,7 @@ def build_launchd_plist(
         "StartInterval": int(interval_seconds),
         "StandardOutPath": str(Path(log_path).expanduser()),
         "StandardErrorPath": str(Path(log_path).expanduser()),
-        "RunAtLoad": False,
+        "RunAtLoad": True,
     }
     if path_env:
         # launchd starts agents with a bare system PATH; version-manager shims
