@@ -125,13 +125,20 @@ class TokenmaxxTests(unittest.TestCase):
         return path
 
     def test_queue_round_trip_and_status_helpers(self):
-        item = QueueItem(cwd="/tmp/repo", session_id="abc", next_attempt_at=200, lease_id="lease-1")
+        item = QueueItem(
+            cwd="/tmp/repo",
+            session_id="abc",
+            next_attempt_at=200,
+            lease_id="lease-1",
+            lease_pid=4321,
+        )
         append_queue_item(self.queue_path, item)
 
         loaded = load_queue(self.queue_path)
         self.assertEqual(loaded[0].cwd, "/tmp/repo")
         self.assertEqual(loaded[0].session_id, "abc")
         self.assertEqual(loaded[0].lease_id, "lease-1")
+        self.assertEqual(loaded[0].lease_pid, 4321)
         self.assertFalse(is_due(loaded[0], now=100))
         self.assertTrue(is_due(loaded[0], now=200))
         self.assertEqual(queue_lock_path(self.queue_path), self.root / "queue.jsonl.lock")
@@ -697,6 +704,24 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(popen.call_args.kwargs["errors"], "replace")
 
+    def test_runner_reports_provider_pid_after_spawn(self):
+        process = Mock()
+        process.pid = 4321
+        process.returncode = 0
+        process.communicate.return_value = ("", "")
+        on_process_start = Mock()
+
+        with patch("tokenmaxx.runner.subprocess.Popen", return_value=process):
+            runner.run_resume_command(
+                ["codex", "exec", "resume", "abc"],
+                cwd="/tmp/repo",
+                timeout_seconds=5,
+                provider_name="codex",
+                on_process_start=on_process_start,
+            )
+
+        on_process_start.assert_called_once_with(4321)
+
     def test_runner_cleans_up_provider_after_communication_failure(self):
         process = Mock()
         process.communicate.side_effect = RuntimeError("pipe failed")
@@ -1196,7 +1221,10 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>/opt/custom/bin:/usr/bin:/bin</string>", plist)
 
     def test_drop_tombstones_queue_item(self):
-        append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc", lease_id="running"))
+        append_queue_item(
+            self.queue_path,
+            QueueItem(cwd="/tmp/repo", session_id="abc", lease_id="running", lease_pid=4321),
+        )
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="keep"))
 
         output = io.StringIO()
@@ -1209,6 +1237,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(dropped.status, "blocked")
         self.assertEqual(dropped.blocked_reason, "dropped by user")
         self.assertEqual(dropped.lease_id, "")
+        self.assertEqual(dropped.lease_pid, 0)
         self.assertFalse(is_due(dropped))
         self.assertEqual(kept.status, "pending")
 
@@ -1280,6 +1309,30 @@ class TokenmaxxTests(unittest.TestCase):
         final = load_queue(self.queue_path)[0]
         self.assertEqual(final.status, "done")
         self.assertEqual(final.attempts, 1)
+
+    def test_watch_defers_expired_lease_while_provider_process_is_alive(self):
+        now = 1_000_000
+        append_queue_item(
+            self.queue_path,
+            QueueItem(
+                cwd="/tmp/repo",
+                session_id="abc",
+                status="pending",
+                next_attempt_at=now - 1,
+                lease_id="old-lease",
+                lease_pid=os.getpid(),
+            ),
+        )
+        args = self.args(now=now, auto_queue=False, dry_run=False)
+
+        with patch("tokenmaxx.cli.run_resume") as run_resume:
+            processed = cli.run_watch_cycle(args, {"claude": "claude"})
+
+        self.assertFalse(processed)
+        run_resume.assert_not_called()
+        item = load_queue(self.queue_path)[0]
+        self.assertEqual(item.status, "pending")
+        self.assertEqual(item.next_attempt_at, now + args.followup_delay_seconds)
 
     def test_merge_resumed_item_respects_midflight_resolution(self):
         pending = [QueueItem(cwd="/tmp/repo", session_id="abc", status="pending")]

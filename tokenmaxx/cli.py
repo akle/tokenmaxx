@@ -77,6 +77,16 @@ def format_time(epoch: int) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
 
 
+def process_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except (ProcessLookupError, TypeError, ValueError, OverflowError):
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def log_line(message: str) -> None:
     # flush=True: the daemon's stdout goes to a file, where Python block-buffers
     # and `tokenmaxx logs` would lag hours behind the queue otherwise.
@@ -126,6 +136,7 @@ def cmd_add(args) -> int:
                     existing.cwd = item.cwd
                     if existing.lease_id:
                         existing.lease_id = ""
+                        existing.lease_pid = 0
                         existing.next_attempt_at = 0
                         existing.updated_at = item.updated_at
             else:
@@ -137,6 +148,7 @@ def cmd_add(args) -> int:
                 existing.blocked_reason = ""
                 existing.updated_at = item.updated_at
                 existing.lease_id = ""
+                existing.lease_pid = 0
         else:
             items.append(item)
         write_queue(args.queue, items)
@@ -308,6 +320,7 @@ def cmd_drop(args) -> int:
                 item.next_attempt_at = 0
                 item.updated_at = now
                 item.lease_id = ""
+                item.lease_pid = 0
         write_queue(args.queue, items)
     identity = session_id if args.provider is None and provider == "claude" else f"{provider}:{session_id}"
     print(f"Dropped {identity}. Kept as a blocked tombstone so auto-queue will not re-add it.")
@@ -331,7 +344,23 @@ def enabled_provider_bins(args) -> dict[str, str]:
     return bins
 
 
-def run_resume(args, item: QueueItem, now: int, bins: dict[str, str]) -> QueueItem:
+def record_resume_pid(queue: Path, lock_timeout_seconds: int, claimed: QueueItem, pid: int) -> None:
+    with queue_lock(queue, lock_timeout_seconds):
+        items = load_queue(queue)
+        for existing in items:
+            if existing.key == claimed.key and existing.status == "pending" and existing.lease_id == claimed.lease_id:
+                existing.lease_pid = int(pid)
+                write_queue(queue, items)
+                return
+
+
+def run_resume(
+    args,
+    item: QueueItem,
+    now: int,
+    bins: dict[str, str],
+    on_process_start=None,
+) -> QueueItem:
     common = dict(
         now=now,
         dry_run=args.dry_run,
@@ -339,6 +368,7 @@ def run_resume(args, item: QueueItem, now: int, bins: dict[str, str]) -> QueueIt
         followup_delay_seconds=args.followup_delay_seconds,
         max_attempts=args.max_attempts,
         resume_timeout_seconds=args.resume_timeout_seconds,
+        on_process_start=on_process_start,
     )
     if item.provider == "claude":
         return claude.run_due_item(item, claude_bin=bins["claude"], **common)
@@ -384,6 +414,15 @@ def run_watch_cycle(args, bins: dict[str, str]) -> bool:
                     dirty = True
                     log_line(f"Deferred {identity}: {reason}.")
                 continue
+            if item.lease_id and item.lease_pid and process_alive(item.lease_pid):
+                reason = f"resume process still running in pid {item.lease_pid}"
+                if args.dry_run:
+                    log_line(f"Would defer {identity}: {reason}.")
+                else:
+                    items[index] = defer_item(item, now, args.followup_delay_seconds, reason)
+                    dirty = True
+                    log_line(f"Deferred {identity}: {reason}.")
+                continue
             # Fresh session snapshot per due item: the auto-queue transcript
             # scan above can take seconds, and the guard should act on data
             # milliseconds old. The residual check-to-resume window is
@@ -411,6 +450,7 @@ def run_watch_cycle(args, bins: dict[str, str]) -> bool:
             # The queue-scoped resume lock still prevents another watcher from
             # claiming a different provider row concurrently.
             item.lease_id = uuid.uuid4().hex
+            item.lease_pid = 0
             resume_item = dataclasses.replace(item)
             lease_seconds = args.resume_timeout_seconds if args.resume_timeout_seconds > 0 else 86_400
             item.next_attempt_at = now + lease_seconds + 300
@@ -421,7 +461,18 @@ def run_watch_cycle(args, bins: dict[str, str]) -> bool:
         if dirty:
             write_queue(args.queue, items)
     if resume_item is not None:
-        updated = run_resume(args, resume_item, now, bins)
+        updated = run_resume(
+            args,
+            resume_item,
+            now,
+            bins,
+            on_process_start=lambda pid: record_resume_pid(
+                args.queue,
+                args.lock_timeout_seconds,
+                resume_item,
+                pid,
+            ),
+        )
         if updated.last_output:
             log_line(f"{updated.provider}:{updated.session_id[:8]}: {updated.last_output}")
         with queue_lock(args.queue, args.lock_timeout_seconds):

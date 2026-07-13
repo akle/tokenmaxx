@@ -59,6 +59,7 @@ class QueueItem:
     created_at: int = 0
     updated_at: int = 0
     lease_id: str = ""
+    lease_pid: int = 0
 
     def __post_init__(self) -> None:
         if self.provider not in SUPPORTED_PROVIDERS:
@@ -69,6 +70,10 @@ class QueueItem:
         self.created_at = int(self.created_at or now)
         self.updated_at = int(self.updated_at or self.created_at)
         self.lease_id = str(self.lease_id or "")
+        try:
+            self.lease_pid = int(self.lease_pid or 0)
+        except (TypeError, ValueError):
+            self.lease_pid = 0
 
     @classmethod
     def from_dict(cls, data: dict) -> "QueueItem":
@@ -84,6 +89,7 @@ class QueueItem:
             created_at=int(data.get("createdAt") or data.get("created_at") or 0),
             updated_at=int(data.get("updatedAt") or data.get("updated_at") or 0),
             lease_id=str(data.get("leaseId") or data.get("lease_id") or ""),
+            lease_pid=data.get("leasePid") or data.get("lease_pid") or 0,
         )
 
     def to_dict(self) -> dict:
@@ -99,6 +105,7 @@ class QueueItem:
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
             "leaseId": self.lease_id,
+            "leasePid": self.lease_pid,
         }
 
     @property
@@ -330,6 +337,7 @@ def apply_limit_event(
     existing.last_output = ""
     existing.updated_at = now
     existing.lease_id = ""
+    existing.lease_pid = 0
     return existing
 
 
@@ -352,6 +360,7 @@ def update_item_after_output(
     item.attempts += 1
     item.updated_at = now
     item.last_output = truncate_output(output)
+    item.lease_pid = 0
     if verdict == "done":
         item.status = "done"
         item.next_attempt_at = 0

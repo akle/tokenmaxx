@@ -35,6 +35,7 @@ def run_resume_command(
     cwd: str,
     timeout_seconds: int,
     provider_name: str,
+    on_process_start=None,
 ) -> tuple[int, str]:
     process = subprocess.Popen(
         command,
@@ -47,6 +48,8 @@ def run_resume_command(
         start_new_session=True,
     )
     try:
+        if on_process_start is not None:
+            on_process_start(process.pid)
         stdout, stderr = process.communicate(timeout=timeout_seconds if timeout_seconds > 0 else None)
     except subprocess.TimeoutExpired as exc:
         terminate_process_group(process)
@@ -77,6 +80,7 @@ def run_due_command(
     followup_delay_seconds: int,
     max_attempts: int,
     resume_timeout_seconds: int,
+    on_process_start=None,
 ) -> QueueItem:
     if not is_due(item, now):
         return item
@@ -89,6 +93,7 @@ def run_due_command(
         cwd=item.cwd,
         timeout_seconds=resume_timeout_seconds,
         provider_name=provider_name,
+        on_process_start=on_process_start,
     )
     if returncode != 0 and not output:
         output = f"{provider_name} exited with code {returncode}"

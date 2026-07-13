@@ -156,6 +156,8 @@ tokenmaxx watch
 - `watch` processes one due item at a time, and runs the resume outside the
   queue lock so `status`, `add`, and `drop` stay usable while a resume is in
   flight.
+- The queue records the provider subprocess PID after launch and does not
+  reclaim an expired lease while that process is still alive.
 - A separate `queue.jsonl.resume.lock` is global to the shared queue and allows
   only one continuation at a time across both providers and concurrent watchers.
 - `drop` stops retries by tombstoning the item (`blocked`, "dropped by user")

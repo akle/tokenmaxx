@@ -59,7 +59,9 @@ tokenmaxx/
    the provider wrapper runs `claude --resume <session-id> -p <guarded prompt>`
    or `codex exec resume --all <session-id> <guarded prompt>` through `runner.py`
    outside the lock so `status`, `add`, and `drop` stay usable during a resume.
-   Dry runs stay under the lock and mutate nothing but cosmetic fields.
+   Once spawned, the provider PID is persisted with the lease; an expired lease
+   is deferred while that provider process is still alive. Dry runs stay under
+   the lock and mutate nothing but cosmetic fields.
 8. `queue.update_item_after_output` records the result and
    `queue.merge_resumed_item` folds it back into a freshly loaded queue; a row
    resolved mid-resume (for example `tokenmaxx drop`) wins over the resume
