@@ -364,7 +364,7 @@ def test_codex_dry_run_uses_exec_resume(self):
         max_attempts=3,
         resume_timeout_seconds=7200,
     )
-    self.assertIn("DRY RUN: codex exec resume codex-1", result.last_output)
+    self.assertIn("DRY RUN: codex exec resume --all codex-1", result.last_output)
 ```
 
 In `test_classify_output_and_retry_updates`, add a local-time assertion for
@@ -434,7 +434,7 @@ def run_due_command(
 ```
 
 Claude and Codex wrappers build their commands and call this function. Codex's
-command is `[codex_bin, "exec", "resume", item.session_id, prompt]`.
+command is `[codex_bin, "exec", "resume", "--all", item.session_id, prompt]`.
 
 Add `CODEX_PROMPT` in `config.py`, requiring the exact completion marker
 `STATUS: DONE` and no dangerous CLI flags.
@@ -665,7 +665,7 @@ cover both installed providers; show `PROVIDER` in status examples; add
 ~/.claude/projects
 ~/.codex/sessions
 claude --resume <id> -p <prompt>
-codex exec resume <id> <prompt>
+codex exec resume --all <id> <prompt>
 ```
 
 State explicitly that only structured/provider-authored terminal limit errors

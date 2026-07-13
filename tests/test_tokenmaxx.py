@@ -354,6 +354,13 @@ class TokenmaxxTests(unittest.TestCase):
 
         self.assertEqual([session["sessionId"] for session in sessions], ["good"])
 
+    def test_find_transcript_skips_file_deleted_mid_scan(self):
+        project_dir = self.projects_dir / "project"
+        project_dir.mkdir()
+        (project_dir / "abc.jsonl").symlink_to(project_dir / "missing.jsonl")
+
+        self.assertIsNone(claude.find_transcript(self.projects_dir, "abc"))
+
     def test_add_writes_selected_session_to_queue(self):
         self.write_session("80544.json", {"pid": 80544, "status": "busy", "cwd": "/tmp/repo", "sessionId": "abc"})
         with redirect_stdout(io.StringIO()):
@@ -690,6 +697,23 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(popen.call_args.kwargs["errors"], "replace")
 
+    def test_runner_cleans_up_provider_after_communication_failure(self):
+        process = Mock()
+        process.communicate.side_effect = RuntimeError("pipe failed")
+
+        with patch("tokenmaxx.runner.subprocess.Popen", return_value=process), patch(
+            "tokenmaxx.runner.terminate_process_group"
+        ) as terminate:
+            with self.assertRaisesRegex(RuntimeError, "pipe failed"):
+                runner.run_resume_command(
+                    ["codex", "exec", "resume", "abc"],
+                    cwd="/tmp/repo",
+                    timeout_seconds=5,
+                    provider_name="codex",
+                )
+
+        terminate.assert_called_once_with(process)
+
     def test_watch_loop_logs_startup_line(self):
         # once=False with an immediate-return side effect via sleep patch
         append_queue_item(self.queue_path, QueueItem(cwd="/tmp/repo", session_id="abc", status="done"))
@@ -718,7 +742,7 @@ class TokenmaxxTests(unittest.TestCase):
         with patch("tokenmaxx.cli.shutil.which", side_effect=lambda name: name), redirect_stdout(output):
             code = cli.cmd_watch(self.args(dry_run=True, auto_queue=False))
         self.assertEqual(code, 0)
-        self.assertIn("codex exec resume codex-session", output.getvalue())
+        self.assertIn("codex exec resume --all codex-session", output.getvalue())
 
     def test_watch_defers_due_item_when_provider_executable_is_missing(self):
         append_queue_item(
@@ -817,6 +841,9 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(add_args.codex_sessions_dir, self.codex_sessions_dir)
         self.assertEqual(watch_args.codex_bin, "/usr/local/bin/codex")
         self.assertEqual(drop_args.provider, "codex")
+
+    def test_package_version_is_patch_release(self):
+        self.assertEqual(cli.__version__, "0.5.1")
 
     def test_watch_defers_item_owned_by_busy_session(self):
         now = 1_000_000

@@ -57,7 +57,7 @@ tokenmaxx/
    `nextAttemptAt` is pushed past the resume timeout), releases the queue lock,
    and
    the provider wrapper runs `claude --resume <session-id> -p <guarded prompt>`
-   or `codex exec resume <session-id> <guarded prompt>` through `runner.py`
+   or `codex exec resume --all <session-id> <guarded prompt>` through `runner.py`
    outside the lock so `status`, `add`, and `drop` stay usable during a resume.
    Dry runs stay under the lock and mutate nothing but cosmetic fields.
 8. `queue.update_item_after_output` records the result and

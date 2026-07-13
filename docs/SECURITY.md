@@ -37,7 +37,7 @@ never adds sandbox, approval, permission, or other bypass flags.
 ## Subprocess Boundary
 
 `claude.py` constructs `claude --resume <id> -p <prompt>` and `codex.py`
-constructs `codex exec resume <id> <prompt>`. `runner.py` executes either
+constructs `codex exec resume --all <id> <prompt>`. `runner.py` executes either
 command. Each command:
 
 - runs in the queued repository working directory;

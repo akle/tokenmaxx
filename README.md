@@ -172,7 +172,7 @@ Each provider receives a guarded prompt. The commands are:
 
 ```text
 claude --resume <id> -p <prompt>
-codex exec resume <id> <prompt>
+codex exec resume --all <id> <prompt>
 ```
 
 Neither command includes bypass flags. The Claude Code prompt is:

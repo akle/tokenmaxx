@@ -164,7 +164,7 @@ def find_active_session(
 
 
 def build_resume_command(item: QueueItem, codex_bin: str, prompt: str = CODEX_PROMPT) -> list[str]:
-    return [codex_bin, "exec", "resume", item.session_id, prompt]
+    return [codex_bin, "exec", "resume", "--all", item.session_id, prompt]
 
 
 def run_due_item(

@@ -74,7 +74,7 @@ resume, tokenmaxx refreshes this state and defers an active session.
 A due Codex item runs non-interactively in its recorded working directory:
 
 ```text
-codex exec resume <session-id> <guarded-prompt>
+codex exec resume --all <session-id> <guarded-prompt>
 ```
 
 The prompt tells Codex to inspect current repository and session state, stop

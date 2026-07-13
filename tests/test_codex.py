@@ -221,4 +221,4 @@ class CodexTests(unittest.TestCase):
             resume_timeout_seconds=7200,
         )
 
-        self.assertIn("DRY RUN: codex exec resume codex-1", result.last_output)
+        self.assertIn("DRY RUN: codex exec resume --all codex-1", result.last_output)

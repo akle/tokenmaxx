@@ -45,8 +45,14 @@ def session_updated_at_seconds(session: dict) -> int:
 
 def find_transcript(projects_dir: Path, session_id: str) -> Path | None:
     projects_dir = Path(projects_dir).expanduser()
-    matches = sorted(projects_dir.glob(f"*/{session_id}.jsonl"), key=lambda path: path.stat().st_mtime, reverse=True)
-    return matches[0] if matches else None
+    matches = []
+    for path in projects_dir.glob(f"*/{session_id}.jsonl"):
+        try:
+            matches.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    matches.sort(key=lambda entry: entry[0], reverse=True)
+    return matches[0][1] if matches else None
 
 
 SYNTHETIC_MODEL = "<synthetic>"

@@ -57,6 +57,12 @@ def run_resume_command(
         )
         message = f"tokenmaxx: {provider_name} resume timed out after {timeout_seconds} seconds"
         return 124, "\n".join(part for part in (partial, message) if part)
+    except BaseException:
+        try:
+            terminate_process_group(process)
+        except BaseException:
+            pass
+        raise
     return process.returncode or 0, "\n".join(part for part in (stdout, stderr) if part)
 
 
