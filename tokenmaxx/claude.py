@@ -184,6 +184,7 @@ def run_due_item(
     max_attempts: int,
     resume_timeout_seconds: int,
     on_process_start=None,
+    lease_lock_path=None,
 ) -> QueueItem:
     command = build_resume_command(item, claude_bin, DEFAULT_PROMPT)
     return run_due_command(
@@ -197,4 +198,5 @@ def run_due_item(
         max_attempts=max_attempts,
         resume_timeout_seconds=resume_timeout_seconds,
         on_process_start=on_process_start,
+        lease_lock_path=lease_lock_path,
     )

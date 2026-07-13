@@ -131,6 +131,7 @@ class TokenmaxxTests(unittest.TestCase):
             next_attempt_at=200,
             lease_id="lease-1",
             lease_pid=4321,
+            lease_lock_path="/tmp/lease-1.lock",
         )
         append_queue_item(self.queue_path, item)
 
@@ -139,6 +140,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(loaded[0].session_id, "abc")
         self.assertEqual(loaded[0].lease_id, "lease-1")
         self.assertEqual(loaded[0].lease_pid, 4321)
+        self.assertEqual(loaded[0].lease_lock_path, "/tmp/lease-1.lock")
         self.assertFalse(is_due(loaded[0], now=100))
         self.assertTrue(is_due(loaded[0], now=200))
         self.assertEqual(queue_lock_path(self.queue_path), self.root / "queue.jsonl.lock")
@@ -753,6 +755,25 @@ class TokenmaxxTests(unittest.TestCase):
 
         on_process_start.assert_called_once_with(4321)
 
+    def test_runner_inherits_lease_lock_during_provider_run(self):
+        process = Mock()
+        process.pid = 4321
+        process.returncode = 0
+        process.communicate.return_value = ("", "")
+        lease_path = self.root / "lease.lock"
+
+        with patch("tokenmaxx.runner.subprocess.Popen", return_value=process) as popen:
+            runner.run_resume_command(
+                ["codex", "exec", "resume", "abc"],
+                cwd="/tmp/repo",
+                timeout_seconds=5,
+                provider_name="codex",
+                lease_lock_path=lease_path,
+            )
+
+        self.assertIn("pass_fds", popen.call_args.kwargs)
+        self.assertTrue(popen.call_args.kwargs["pass_fds"])
+
     def test_runner_cleans_up_provider_after_communication_failure(self):
         process = Mock()
         process.communicate.side_effect = RuntimeError("pipe failed")
@@ -1343,6 +1364,7 @@ class TokenmaxxTests(unittest.TestCase):
 
     def test_watch_defers_expired_lease_while_provider_process_is_alive(self):
         now = 1_000_000
+        lease_path = self.root / "lease.lock"
         append_queue_item(
             self.queue_path,
             QueueItem(
@@ -1351,13 +1373,14 @@ class TokenmaxxTests(unittest.TestCase):
                 status="pending",
                 next_attempt_at=now - 1,
                 lease_id="old-lease",
-                lease_pid=os.getpid(),
+                lease_lock_path=str(lease_path),
             ),
         )
         args = self.args(now=now, auto_queue=False, dry_run=False)
 
-        with patch("tokenmaxx.cli.run_resume") as run_resume:
-            processed = cli.run_watch_cycle(args, {"claude": "claude"})
+        with queue_module.process_lease_lock(lease_path):
+            with patch("tokenmaxx.cli.run_resume") as run_resume:
+                processed = cli.run_watch_cycle(args, {"claude": "claude"})
 
         self.assertFalse(processed)
         run_resume.assert_not_called()

@@ -41,7 +41,9 @@ from .queue import (
     load_queue,
     merge_resumed_item,
     one_line,
+    process_lease_held,
     queue_lock,
+    resume_lease_path,
     resume_lock,
     write_queue,
 )
@@ -137,6 +139,7 @@ def cmd_add(args) -> int:
                     if existing.lease_id:
                         existing.lease_id = ""
                         existing.lease_pid = 0
+                        existing.lease_lock_path = ""
                         existing.next_attempt_at = 0
                         existing.updated_at = item.updated_at
             else:
@@ -149,6 +152,7 @@ def cmd_add(args) -> int:
                 existing.updated_at = item.updated_at
                 existing.lease_id = ""
                 existing.lease_pid = 0
+                existing.lease_lock_path = ""
         else:
             items.append(item)
         write_queue(args.queue, items)
@@ -321,6 +325,7 @@ def cmd_drop(args) -> int:
                 item.updated_at = now
                 item.lease_id = ""
                 item.lease_pid = 0
+                item.lease_lock_path = ""
         write_queue(args.queue, items)
     identity = session_id if args.provider is None and provider == "claude" else f"{provider}:{session_id}"
     print(f"Dropped {identity}. Kept as a blocked tombstone so auto-queue will not re-add it.")
@@ -369,6 +374,7 @@ def run_resume(
         max_attempts=args.max_attempts,
         resume_timeout_seconds=args.resume_timeout_seconds,
         on_process_start=on_process_start,
+        lease_lock_path=item.lease_lock_path,
     )
     if item.provider == "claude":
         return claude.run_due_item(item, claude_bin=bins["claude"], **common)
@@ -414,8 +420,17 @@ def run_watch_cycle(args, bins: dict[str, str]) -> bool:
                     dirty = True
                     log_line(f"Deferred {identity}: {reason}.")
                 continue
-            if item.lease_id and item.lease_pid and process_alive(item.lease_pid):
-                reason = f"resume process still running in pid {item.lease_pid}"
+            lease_process_alive = bool(
+                item.lease_lock_path and process_lease_held(item.lease_lock_path)
+            )
+            if not lease_process_alive and not item.lease_lock_path and item.lease_pid:
+                lease_process_alive = process_alive(item.lease_pid)
+            if item.lease_id and lease_process_alive:
+                reason = (
+                    f"resume process still running in pid {item.lease_pid}"
+                    if item.lease_pid
+                    else "resume process still running"
+                )
                 if args.dry_run:
                     log_line(f"Would defer {identity}: {reason}.")
                 else:
@@ -451,6 +466,7 @@ def run_watch_cycle(args, bins: dict[str, str]) -> bool:
             # claiming a different provider row concurrently.
             item.lease_id = uuid.uuid4().hex
             item.lease_pid = 0
+            item.lease_lock_path = str(resume_lease_path(args.queue, item.lease_id))
             resume_item = dataclasses.replace(item)
             lease_seconds = args.resume_timeout_seconds if args.resume_timeout_seconds > 0 else 86_400
             item.next_attempt_at = now + lease_seconds + 300

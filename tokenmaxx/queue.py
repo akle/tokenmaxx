@@ -60,6 +60,7 @@ class QueueItem:
     updated_at: int = 0
     lease_id: str = ""
     lease_pid: int = 0
+    lease_lock_path: str = ""
 
     def __post_init__(self) -> None:
         if self.provider not in SUPPORTED_PROVIDERS:
@@ -74,6 +75,7 @@ class QueueItem:
             self.lease_pid = max(0, int(self.lease_pid or 0))
         except (TypeError, ValueError):
             self.lease_pid = 0
+        self.lease_lock_path = str(self.lease_lock_path or "")
 
     @classmethod
     def from_dict(cls, data: dict) -> "QueueItem":
@@ -90,6 +92,7 @@ class QueueItem:
             updated_at=int(data.get("updatedAt") or data.get("updated_at") or 0),
             lease_id=str(data.get("leaseId") or data.get("lease_id") or ""),
             lease_pid=data.get("leasePid") or data.get("lease_pid") or 0,
+            lease_lock_path=str(data.get("leaseLock") or data.get("lease_lock_path") or ""),
         )
 
     def to_dict(self) -> dict:
@@ -106,6 +109,7 @@ class QueueItem:
             "updatedAt": self.updated_at,
             "leaseId": self.lease_id,
             "leasePid": self.lease_pid,
+            "leaseLock": self.lease_lock_path,
         }
 
     @property
@@ -201,6 +205,43 @@ def queue_lock_path(queue: Path) -> Path:
 def resume_lock_path(queue: Path) -> Path:
     queue = Path(queue).expanduser()
     return queue.with_name(queue.name + ".resume.lock")
+
+
+def resume_lease_path(queue: Path, lease_id: str) -> Path:
+    queue = Path(queue).expanduser()
+    return queue.with_name(f"{queue.name}.{lease_id}.lease")
+
+
+@contextmanager
+def process_lease_lock(path: Path):
+    if fcntl is None:
+        yield None
+        return
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            yield handle
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def process_lease_held(path: Path) -> bool:
+    if fcntl is None:
+        return False
+    try:
+        with Path(path).expanduser().open("a+") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 @contextmanager
@@ -338,6 +379,7 @@ def apply_limit_event(
     existing.updated_at = now
     existing.lease_id = ""
     existing.lease_pid = 0
+    existing.lease_lock_path = ""
     return existing
 
 
@@ -361,6 +403,7 @@ def update_item_after_output(
     item.updated_at = now
     item.last_output = truncate_output(output)
     item.lease_pid = 0
+    item.lease_lock_path = ""
     if verdict == "done":
         item.status = "done"
         item.next_attempt_at = 0
