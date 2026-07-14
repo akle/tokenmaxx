@@ -135,6 +135,86 @@ class CodexTests(unittest.TestCase):
 
         self.assertEqual(codex.session_limit_hit_at(session), 980)
 
+    def test_terminal_rate_limit_telemetry_is_queued_until_reset(self):
+        self.write_rollout(
+            records=(
+                event(
+                    "token_count",
+                    "1970-01-01T00:16:20Z",
+                    rate_limits={
+                        "primary": {
+                            "used_percent": 100.0,
+                            "window_minutes": 10080,
+                            "resets_at": 1100,
+                        },
+                        "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+                        "rate_limit_reached_type": None,
+                    },
+                ),
+            )
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+        )
+
+        self.assertEqual(codex.session_limit_hit_at(sessions[0]), 980)
+        self.assertEqual(items[0].next_attempt_at, 1160)
+
+    def test_stale_rate_limit_telemetry_is_ignored(self):
+        self.write_rollout(
+            records=(
+                event(
+                    "token_count",
+                    "1970-01-01T00:16:20Z",
+                    rate_limits={
+                        "primary": {"used_percent": 100.0, "resets_at": 900},
+                        "rate_limit_reached_type": None,
+                    },
+                ),
+            )
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+
+        self.assertIsNone(codex.session_limit_hit_at(session))
+
+    def test_completed_task_does_not_requeue_older_rate_limit_telemetry(self):
+        self.write_rollout(
+            records=(
+                event(
+                    "token_count",
+                    "1970-01-01T00:16:20Z",
+                    rate_limits={
+                        "primary": {"used_percent": 100.0, "resets_at": 1100},
+                        "rate_limit_reached_type": None,
+                    },
+                ),
+                event("task_complete", "1970-01-01T00:16:21Z"),
+            )
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+
+        self.assertIsNone(codex.session_limit_hit_at(session))
+
+    def test_model_capacity_error_is_not_a_usage_limit(self):
+        self.write_rollout(
+            records=(
+                event(
+                    "error",
+                    "1970-01-01T00:16:20Z",
+                    message="Selected model is at capacity. Please try a different model.",
+                ),
+            )
+        )
+        session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
+
+        self.assertIsNone(codex.session_limit_hit_at(session))
+
     def test_newer_task_started_suppresses_old_limit(self):
         self.write_rollout(
             records=(

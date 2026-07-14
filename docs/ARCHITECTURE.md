@@ -38,11 +38,13 @@ tokenmaxx/
    Regular messages that merely mention limit phrases never queue a session,
    and a real assistant record after the banner means the session already
    resumed.
-4. `codex.session_limit_hit_at` accepts only a terminal provider-authored
-   `event_msg` error with structured code `usage_limit_exceeded`, or the exact
-   provider usage-limit prefix when the structured code is absent. Generic
-   errors and ordinary text are ignored; a later task start suppresses an old
-   limit.
+4. `codex.session_limit_hit_at` accepts a terminal provider-authored
+   `event_msg` error with structured code `usage_limit_exceeded`, the exact
+   provider usage-limit prefix when the structured code is absent, or an
+   exhausted `token_count.rate_limits` window with a future reset. Generic and
+   model-capacity errors are ignored; a later task start suppresses an old
+   limit. Telemetry-backed queue rows wait until the reported reset plus the
+   normal reset buffer.
 5. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
    A session with an existing `done`/`blocked` row is re-armed (pending, fresh
    attempts) when its banner is newer than the row's last update — a new limit

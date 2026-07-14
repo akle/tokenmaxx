@@ -52,11 +52,13 @@ continuation globally per queue.
 ## Detection Boundary
 
 Claude Code auto-queue accepts only terminal synthetic assistant limit banners.
-Codex auto-queue accepts only terminal provider-authored error events with the
-structured `usage_limit_exceeded` code, plus the exact provider-authored
-usage-limit prefix when a Codex version omits that code. User prompts, assistant
-text, tool output, file content, and generic errors must never trigger a queue
-entry merely because they mention a limit.
+Codex auto-queue accepts terminal provider-authored error events with the
+structured `usage_limit_exceeded` code, the exact provider-authored usage-limit
+prefix when a Codex version omits that code, or provider-authored
+`token_count.rate_limits` telemetry showing an exhausted window with a future
+reset. User prompts, assistant text, tool output, file content, generic errors,
+and model-capacity errors must never trigger a queue entry merely because they
+mention a limit.
 
 ## Launchd Boundary
 

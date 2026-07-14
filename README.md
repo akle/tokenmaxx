@@ -142,11 +142,12 @@ tokenmaxx watch
 - Auto-queue only queues sessions whose transcript ends on a Claude limit banner
   (a synthetic assistant record). Sessions that merely *mention* limits in
   regular messages, tool output, or file contents are not queued.
-- Codex auto-queue only accepts a terminal provider-authored `event_msg` error
-  with structured code `usage_limit_exceeded`. For compatibility with Codex
-  versions that omit the code, the exact provider-authored usage-limit error
-  prefix is accepted in that same error record. Generic errors and limit text
-  in user, assistant, tool, or file content are ignored.
+- Codex auto-queue accepts a terminal provider-authored `event_msg` error with
+  structured code `usage_limit_exceeded`, the exact provider-authored
+  usage-limit error prefix when the code is omitted, or a `token_count` event
+  whose rate-limit window is exhausted and has a future reset. Generic errors,
+  model-capacity errors, and limit text in user, assistant, tool, or file
+  content are ignored.
 - A session whose queue row is already `done` or `blocked` is re-armed with
   fresh attempts when it hits a *new* limit (banner newer than the row).
   Sessions you `drop` are never re-armed.

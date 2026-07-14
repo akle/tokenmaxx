@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from .config import CODEX_PROMPT
-from .queue import QueueItem, apply_limit_event
+from .queue import RESET_BUFFER_SECONDS, QueueItem, apply_limit_event
 from .runner import run_due_command
 from .transcript import record_timestamp, tail_records
 
@@ -20,6 +20,48 @@ def is_usage_limit_error(payload: dict) -> bool:
         and isinstance(message, str)
         and message.startswith("You've hit your usage limit.")
     )
+
+
+def rate_limit_telemetry(payload: dict, observed_at: int) -> tuple[bool, int | None] | None:
+    """Return whether provider telemetry says a Codex rate limit is terminal.
+
+    Recent Codex versions emit exhausted windows in `token_count` events rather
+    than a separate `error` event. A stale 100% snapshot is ignored when its
+    reset is already in the past; this prevents old rollout metadata from
+    re-arming a completed session.
+    """
+    if payload.get("type") != "token_count":
+        return None
+    rate_limits = payload.get("rate_limits")
+    if not isinstance(rate_limits, dict):
+        return None
+
+    reached_type = rate_limits.get("rate_limit_reached_type")
+    exhausted = isinstance(reached_type, str) and bool(reached_type.strip())
+    reset_times: list[int] = []
+    for bucket_name in ("primary", "secondary"):
+        bucket = rate_limits.get(bucket_name)
+        if not isinstance(bucket, dict):
+            continue
+        try:
+            used_percent = float(bucket.get("used_percent"))
+        except (TypeError, ValueError):
+            continue
+        if used_percent < 100:
+            continue
+        raw_reset = bucket.get("resets_at")
+        try:
+            reset_at = int(raw_reset)
+        except (TypeError, ValueError):
+            reset_at = 0
+        if reset_at <= 0 or reset_at > observed_at:
+            exhausted = True
+        if reset_at > observed_at:
+            reset_times.append(reset_at)
+
+    if not exhausted:
+        return None
+    return True, min(reset_times) if reset_times else None
 
 
 def load_codex_sessions(
@@ -70,10 +112,11 @@ def session_updated_at_seconds(session: dict) -> int:
     return int(session.get("updatedAt") or 0) // 1000
 
 
-def session_limit_hit_at(session: dict) -> int | None:
+def session_limit_info(session: dict) -> tuple[int, int | None] | None:
     path = session.get("_path")
     if not path:
         return None
+    saw_task_complete = False
     for record in reversed(tail_records(Path(path))):
         if record.get("type") != "event_msg":
             continue
@@ -84,13 +127,31 @@ def session_limit_hit_at(session: dict) -> int | None:
         if event_type == "task_started":
             return None
         if event_type == "task_complete":
+            saw_task_complete = True
+            continue
+        if event_type == "token_count":
+            if saw_task_complete:
+                return None
+            telemetry = rate_limit_telemetry(payload, record_timestamp(record))
+            if telemetry is not None:
+                return record_timestamp(record), telemetry[1]
             continue
         if event_type != "error":
             continue
         if is_usage_limit_error(payload):
-            return record_timestamp(record)
+            return record_timestamp(record), None
         return None
     return None
+
+
+def session_limit_hit_at(session: dict) -> int | None:
+    info = session_limit_info(session)
+    return info[0] if info is not None else None
+
+
+def session_limit_retry_at(session: dict) -> int | None:
+    info = session_limit_info(session)
+    return info[1] if info is not None else None
 
 
 def build_limited_queue_items(
@@ -109,9 +170,10 @@ def build_limited_queue_items(
         updated_at = session_updated_at_seconds(session)
         if updated_at <= 0 or now - updated_at > max_age_seconds:
             continue
-        hit_at = session_limit_hit_at(session)
-        if hit_at is None:
+        info = session_limit_info(session)
+        if info is None:
             continue
+        hit_at, retry_at = info
         item = apply_limit_event(
             items,
             provider="codex",
@@ -121,6 +183,8 @@ def build_limited_queue_items(
             now=now,
         )
         if item is not None:
+            if retry_at is not None and retry_at > now:
+                item.next_attempt_at = retry_at + RESET_BUFFER_SECONDS
             affected.append(item)
     return affected
 
@@ -145,6 +209,10 @@ def session_is_active(session: dict, now: int, grace_seconds: int) -> bool:
         if event_type == "task_complete":
             return False
         if event_type == "error" and is_usage_limit_error(payload):
+            return False
+        if event_type == "token_count" and rate_limit_telemetry(
+            payload, record_timestamp(record)
+        ):
             return False
         if event_type == "task_started":
             return now - record_timestamp(record) < ACTIVE_STALENESS_SECONDS
