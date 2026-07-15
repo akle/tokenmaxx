@@ -23,7 +23,8 @@ tokenmaxx/
 ## Runtime Data Flow
 
 1. `tokenmaxx autoqueue` scans both providers: Claude metadata under
-   `~/.claude/sessions` and Codex rollouts under `~/.codex/sessions`. When
+   `~/.claude/sessions`, Codex rollouts under `~/.codex/sessions`, and the
+   bounded Codex history tail in `~/.codex/history.jsonl`. When
    auto-queue is enabled, `tokenmaxx watch` scans only providers whose
    executables resolved for that invocation.
 2. For each recent Claude session, `claude.find_transcript` looks for a matching
@@ -43,8 +44,11 @@ tokenmaxx/
    provider usage-limit prefix when the structured code is absent, or an
    exhausted `token_count.rate_limits` window with a future reset. Generic and
    model-capacity errors are ignored; a later task start suppresses an old
-   limit. Telemetry-backed queue rows wait until the reported reset plus the
-   normal reset buffer.
+   limit. `codex.load_remote_compact_events` additionally reads the exact
+   remote-compaction stream-disconnect record from `history.jsonl`; a later
+   rollout `task_started` or `task_complete` suppresses that history event.
+   Telemetry-backed queue rows wait until the reported reset plus the normal
+   reset buffer.
 5. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
    A session with an existing `done`/`blocked` row is re-armed (pending, fresh
    attempts) when its banner is newer than the row's last update — a new limit
@@ -121,8 +125,8 @@ macOS background operation uses launchd:
 - `tokenmaxx logs` prints or follows the configured log file.
 
 The daemon command is a normal `tokenmaxx watch` invocation with queue, Claude
-sessions/projects, Codex sessions, lock timeout, interval, and all available
-`--claude-bin` and `--codex-bin` arguments recorded in the plist. Provider
+sessions/projects, Codex sessions/history, lock timeout, interval, and all
+available `--claude-bin` and `--codex-bin` arguments recorded in the plist. Provider
 executables are resolved at install/start time because launchd
 does not inherit the user's interactive shell PATH. The invoking shell's `PATH`
 is also embedded in the plist's `EnvironmentVariables`, because version-manager

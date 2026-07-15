@@ -24,7 +24,7 @@ CODEX_PROMPT = """Continue this Codex session only if unfinished.
 
 First inspect the current repo/session state and decide whether work remains.
 If the prior task is already complete, respond with exactly STATUS: DONE and stop.
-If it hit a usage limit before finishing, resume the remaining work.
+If it hit a usage limit or a transient remote compaction/transport failure before finishing, resume the remaining work.
 Do not change or bypass the configured sandbox or approval settings.
 When the task is complete, end with exactly STATUS: DONE."""
 
@@ -43,6 +43,10 @@ def default_sessions_dir() -> Path:
 
 def default_codex_sessions_dir() -> Path:
     return Path.home() / ".codex" / "sessions"
+
+
+def default_codex_history_file() -> Path:
+    return Path.home() / ".codex" / "history.jsonl"
 
 
 def default_projects_dir() -> Path:

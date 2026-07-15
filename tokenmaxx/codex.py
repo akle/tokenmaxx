@@ -10,6 +10,13 @@ from .transcript import record_timestamp, tail_records
 
 
 ACTIVE_STALENESS_SECONDS = 24 * 60 * 60
+HISTORY_SCAN_MAX_LINES = 2_000
+ROLLOUT_ACTIVITY_SCAN_MAX_LINES = 2_000
+REMOTE_COMPACT_ERROR_PREFIX = (
+    "\u25a0 Error running remote compact task: stream disconnected before completion: "
+    "error sending request for url"
+)
+REMOTE_COMPACT_ERROR_URL = "https://chatgpt.com/backend-api/codex/responses"
 
 
 def is_usage_limit_error(payload: dict) -> bool:
@@ -20,6 +27,53 @@ def is_usage_limit_error(payload: dict) -> bool:
         and isinstance(message, str)
         and message.startswith("You've hit your usage limit.")
     )
+
+
+def is_remote_compact_disconnect(text: object) -> bool:
+    return (
+        isinstance(text, str)
+        and text.startswith(REMOTE_COMPACT_ERROR_PREFIX)
+        and REMOTE_COMPACT_ERROR_URL in text
+    )
+
+
+def history_record_timestamp(record: dict) -> int:
+    try:
+        return int(record.get("ts"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def load_remote_compact_events(
+    history_path: Path | None,
+    *,
+    now: int,
+    max_session_age_hours: float,
+) -> dict[str, int]:
+    """Return recent Codex remote-compaction failures keyed by session ID.
+
+    Codex persists this particular failure in `~/.codex/history.jsonl`, not in
+    the rollout's provider event stream. Keep the match exact so ordinary
+    transport errors or user-copied text cannot auto-queue a session.
+    """
+    if history_path is None:
+        return {}
+    max_age_seconds = float(max_session_age_hours) * 60 * 60
+    events: dict[str, int] = {}
+    for record in tail_records(Path(history_path), max_lines=HISTORY_SCAN_MAX_LINES):
+        session_id = record.get("session_id")
+        hit_at = history_record_timestamp(record)
+        if (
+            not isinstance(session_id, str)
+            or not session_id
+            or hit_at <= 0
+            or hit_at > now
+            or now - hit_at > max_age_seconds
+            or not is_remote_compact_disconnect(record.get("text"))
+        ):
+            continue
+        events[session_id] = max(hit_at, events.get(session_id, 0))
+    return events
 
 
 def rate_limit_telemetry(payload: dict, observed_at: int) -> tuple[bool, int | None] | None:
@@ -154,14 +208,43 @@ def session_limit_retry_at(session: dict) -> int | None:
     return info[1] if info is not None else None
 
 
+def session_has_newer_task_activity(session: dict, event_at: int) -> bool:
+    path = session.get("_path")
+    if not path:
+        return False
+    for record in tail_records(Path(path), max_lines=ROLLOUT_ACTIVITY_SCAN_MAX_LINES):
+        if record.get("type") != "event_msg":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") not in {"task_started", "task_complete"}:
+            continue
+        if record_timestamp(record) > event_at:
+            return True
+    return False
+
+
+def remote_compact_hit_at(session: dict, events: dict[str, int]) -> int | None:
+    session_id = str(session.get("sessionId") or "")
+    hit_at = events.get(session_id)
+    if hit_at is None or session_has_newer_task_activity(session, hit_at):
+        return None
+    return hit_at
+
+
 def build_limited_queue_items(
     sessions: list[dict],
     items: list[QueueItem],
     *,
     now: int,
     max_session_age_hours: float,
+    history_path: Path | None = None,
 ) -> list[QueueItem]:
     max_age_seconds = int(float(max_session_age_hours) * 60 * 60)
+    compact_events = load_remote_compact_events(
+        history_path,
+        now=now,
+        max_session_age_hours=max_session_age_hours,
+    )
     affected: list[QueueItem] = []
     for session in sessions:
         session_id = str(session.get("sessionId") or "")
@@ -171,6 +254,9 @@ def build_limited_queue_items(
         if updated_at <= 0 or now - updated_at > max_age_seconds:
             continue
         info = session_limit_info(session)
+        compact_hit_at = remote_compact_hit_at(session, compact_events)
+        if compact_hit_at is not None and (info is None or compact_hit_at > info[0]):
+            info = (compact_hit_at, None)
         if info is None:
             continue
         hit_at, retry_at = info

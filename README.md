@@ -21,8 +21,8 @@ limit reset, and type "continue" later.
 `tokenmaxx` turns that into a local queue:
 
 1. Find recent Claude Code and Codex sessions.
-2. Read bounded transcript tails for provider-authored limit events.
-3. Queue only terminal Claude limit banners or structured Codex limit errors.
+2. Read bounded transcript tails and Codex history records for provider-authored stop events.
+3. Queue only terminal Claude limit banners, structured Codex limit errors, or the exact Codex remote-compaction disconnect record.
 4. Resume due sessions later with a prompt that first asks the provider to verify whether work remains.
 5. Back off on limit output and block noisy sessions after repeated attempts.
 
@@ -138,16 +138,18 @@ tokenmaxx watch
 - Queue writes use a sibling lock file: `queue.jsonl.lock`.
 - Auto-queue reads Claude Code session metadata in `~/.claude/sessions`, Claude
   transcript tails in `~/.claude/projects`, and Codex rollout files under
-  `~/.codex/sessions`.
+  `~/.codex/sessions` plus the bounded `~/.codex/history.jsonl` history tail.
 - Auto-queue only queues sessions whose transcript ends on a Claude limit banner
   (a synthetic assistant record). Sessions that merely *mention* limits in
   regular messages, tool output, or file contents are not queued.
 - Codex auto-queue accepts a terminal provider-authored `event_msg` error with
   structured code `usage_limit_exceeded`, the exact provider-authored
   usage-limit error prefix when the code is omitted, or a `token_count` event
-  whose rate-limit window is exhausted and has a future reset. Generic errors,
-  model-capacity errors, and limit text in user, assistant, tool, or file
-  content are ignored.
+  whose rate-limit window is exhausted and has a future reset. It also accepts
+  the exact `Error running remote compact task` disconnect record in
+  `~/.codex/history.jsonl` when the rollout has no newer task activity. Generic
+  errors, model-capacity errors, and limit text in user, assistant, tool, or
+  file content are ignored.
 - A session whose queue row is already `done` or `blocked` is re-armed with
   fresh attempts when it hits a *new* limit (banner newer than the row).
   Sessions you `drop` are never re-armed.

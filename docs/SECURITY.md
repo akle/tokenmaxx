@@ -10,6 +10,8 @@ tokenmaxx reads local provider data:
 - `~/.claude/sessions` for session metadata;
 - `~/.claude/projects` for transcript tails;
 - `~/.codex/sessions` for Codex rollout metadata and event tails;
+- `~/.codex/history.jsonl` for the bounded Codex history tail used to detect
+  remote compaction disconnects;
 - `~/.tokenmaxx/queue.jsonl` for queue state;
 - `~/.tokenmaxx/tokenmaxx.log` for daemon output by default.
 
@@ -54,11 +56,12 @@ continuation globally per queue.
 Claude Code auto-queue accepts only terminal synthetic assistant limit banners.
 Codex auto-queue accepts terminal provider-authored error events with the
 structured `usage_limit_exceeded` code, the exact provider-authored usage-limit
-prefix when a Codex version omits that code, or provider-authored
+prefix when a Codex version omits that code, provider-authored
 `token_count.rate_limits` telemetry showing an exhausted window with a future
-reset. User prompts, assistant text, tool output, file content, generic errors,
-and model-capacity errors must never trigger a queue entry merely because they
-mention a limit.
+reset, or the exact remote-compaction disconnect record in Codex history. User
+prompts, assistant text, tool output, file content, generic errors, and
+model-capacity errors must never trigger a queue entry merely because they
+mention a limit or transport failure.
 
 ## Launchd Boundary
 

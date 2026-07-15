@@ -20,6 +20,7 @@ from .config import (
     DEFAULT_MAX_SESSION_AGE_HOURS,
     DEFAULT_RETRY_DELAY_SECONDS,
     DEFAULT_RESUME_TIMEOUT_SECONDS,
+    default_codex_history_file,
     default_codex_sessions_dir,
     default_log_path,
     default_plist_path,
@@ -270,6 +271,7 @@ def autoqueue_limited_sessions(
             items,
             now=now,
             max_session_age_hours=args.max_session_age_hours,
+            history_path=getattr(args, "codex_history_file", None),
         )
     raise ValueError(f"unsupported provider: {provider}")
 
@@ -549,6 +551,7 @@ def cmd_launchd_install(args) -> int:
         interval_seconds=args.interval_seconds,
         sessions_dir=args.sessions_dir,
         codex_sessions_dir=args.codex_sessions_dir,
+        codex_history_file=args.codex_history_file,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
         path_env=os.environ.get("PATH"),
@@ -605,6 +608,7 @@ def cmd_start(args) -> int:
         interval_seconds=args.interval_seconds,
         sessions_dir=args.sessions_dir,
         codex_sessions_dir=args.codex_sessions_dir,
+        codex_history_file=args.codex_history_file,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
         path_env=os.environ.get("PATH"),
@@ -685,6 +689,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--queue", type=Path, default=default_queue_path())
     parser.add_argument("--sessions-dir", type=Path, default=default_sessions_dir())
     parser.add_argument("--codex-sessions-dir", type=Path, default=default_codex_sessions_dir())
+    parser.add_argument("--codex-history-file", type=Path, default=default_codex_history_file())
     parser.add_argument("--projects-dir", type=Path, default=default_projects_dir())
     parser.add_argument("--lock-timeout-seconds", type=int, default=10)
 

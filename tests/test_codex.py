@@ -30,6 +30,11 @@ class CodexTests(unittest.TestCase):
         os.utime(path, (mtime, mtime))
         return path
 
+    def write_history(self, records):
+        path = self.root / "history.jsonl"
+        path.write_text("".join(json.dumps(record) + "\n" for record in records))
+        return path
+
     def test_tail_records_returns_only_requested_valid_dicts(self):
         path = self.root / "tail.jsonl"
         path.write_text('{"n":1}\nnot-json\n{"n":2}\n{"n":3}\n')
@@ -134,6 +139,101 @@ class CodexTests(unittest.TestCase):
         session = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)[0]
 
         self.assertEqual(codex.session_limit_hit_at(session), 980)
+
+    def test_remote_compact_disconnect_requires_the_exact_codex_history_message(self):
+        message = (
+            "\u25a0 Error running remote compact task: stream disconnected before completion: "
+            "error sending request for url\n"
+            "(https://chatgpt.com/backend-api/codex/responses)"
+        )
+
+        self.assertTrue(codex.is_remote_compact_disconnect(message))
+        self.assertFalse(codex.is_remote_compact_disconnect("stream disconnected before completion"))
+        self.assertFalse(codex.is_remote_compact_disconnect(message.replace("remote compact", "remote request")))
+
+    def test_history_remote_compact_disconnect_is_queued(self):
+        self.write_rollout()
+        history = self.write_history(
+            [
+                {
+                    "session_id": "codex-1",
+                    "ts": 980,
+                    "text": (
+                        "\u25a0 Error running remote compact task: stream disconnected before completion: "
+                        "error sending request for url\n"
+                        "(https://chatgpt.com/backend-api/codex/responses)"
+                    ),
+                }
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        affected = codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            history_path=history,
+        )
+
+        self.assertEqual(affected, items)
+        self.assertEqual(items[0].session_id, "codex-1")
+        self.assertEqual(items[0].provider, "codex")
+
+    def test_newer_rollout_task_activity_suppresses_history_remote_compact_disconnect(self):
+        self.write_rollout(records=(event("task_started", "1970-01-01T00:16:30Z"),))
+        history = self.write_history(
+            [
+                {
+                    "session_id": "codex-1",
+                    "ts": 980,
+                    "text": (
+                        "\u25a0 Error running remote compact task: stream disconnected before completion: "
+                        "error sending request for url\n"
+                        "(https://chatgpt.com/backend-api/codex/responses)"
+                    ),
+                }
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            history_path=history,
+        )
+
+        self.assertEqual(items, [])
+
+    def test_history_remote_compact_disconnect_ignores_stale_and_unrelated_records(self):
+        self.write_rollout()
+        history = self.write_history(
+            [
+                {
+                    "session_id": "stale",
+                    "ts": 1,
+                    "text": (
+                        "\u25a0 Error running remote compact task: stream disconnected before completion: "
+                        "error sending request for url\n"
+                        "(https://chatgpt.com/backend-api/codex/responses)"
+                    ),
+                },
+                {
+                    "session_id": "codex-1",
+                    "ts": 980,
+                    "text": "The user mentioned a remote compact error in a file.",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            codex.load_remote_compact_events(history, now=1000, max_session_age_hours=0.01),
+            {},
+        )
 
     def test_terminal_rate_limit_telemetry_is_queued_until_reset(self):
         self.write_rollout(

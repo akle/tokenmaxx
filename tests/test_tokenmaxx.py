@@ -54,6 +54,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.queue_path = self.root / "queue.jsonl"
         self.sessions_dir = self.root / "sessions"
         self.codex_sessions_dir = self.root / "codex-sessions"
+        self.codex_history_file = self.root / "codex-history.jsonl"
         self.projects_dir = self.root / "projects"
         self.sessions_dir.mkdir()
         self.codex_sessions_dir.mkdir()
@@ -67,6 +68,7 @@ class TokenmaxxTests(unittest.TestCase):
             "queue": self.queue_path,
             "sessions_dir": self.sessions_dir,
             "codex_sessions_dir": self.codex_sessions_dir,
+            "codex_history_file": self.codex_history_file,
             "projects_dir": self.projects_dir,
             "pid": None,
             "session_id": None,
@@ -537,6 +539,31 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual({item.key for item in load_queue(self.queue_path)}, {("claude", "same"), ("codex", "same")})
 
+    def test_autoqueue_adds_codex_remote_compaction_failures(self):
+        self.write_codex_session("compact")
+        self.codex_history_file.write_text(
+            json.dumps(
+                {
+                    "session_id": "compact",
+                    "ts": 980,
+                    "text": (
+                        "\u25a0 Error running remote compact task: stream disconnected before completion: "
+                        "error sending request for url\n"
+                        "(https://chatgpt.com/backend-api/codex/responses)"
+                    ),
+                }
+            )
+            + "\n"
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 1 session", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].key, ("codex", "compact"))
+
     def rearm_fixture(self, existing_status, existing_updated_at, banner_timestamp, blocked_reason=""):
         append_queue_item(
             self.queue_path,
@@ -920,7 +947,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(drop_args.provider, "codex")
 
     def test_package_version_is_patch_release(self):
-        self.assertEqual(cli.__version__, "0.5.2")
+        self.assertEqual(cli.__version__, "0.5.3")
 
     def test_watch_defers_item_owned_by_busy_session(self):
         now = 1_000_000
@@ -1237,6 +1264,7 @@ class TokenmaxxTests(unittest.TestCase):
             interval_seconds=300,
             sessions_dir=Path("/tmp/sessions"),
             codex_sessions_dir=Path("/tmp/codex-sessions"),
+            codex_history_file=Path("/tmp/codex-history.jsonl"),
             projects_dir=Path("/tmp/projects"),
             lock_timeout_seconds=7,
         )
@@ -1252,6 +1280,8 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>/tmp/sessions</string>", plist)
         self.assertIn("<string>--codex-sessions-dir</string>", plist)
         self.assertIn("<string>/tmp/codex-sessions</string>", plist)
+        self.assertIn("<string>--codex-history-file</string>", plist)
+        self.assertIn("<string>/tmp/codex-history.jsonl</string>", plist)
         self.assertIn("<string>--projects-dir</string>", plist)
         self.assertIn("<string>/tmp/projects</string>", plist)
         self.assertIn("<string>--lock-timeout-seconds</string>", plist)
