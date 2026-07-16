@@ -38,7 +38,8 @@ class CodexTests(unittest.TestCase):
 
     def write_logs_db(self, records):
         path = self.root / "logs_2.sqlite"
-        with sqlite3.connect(path) as connection:
+        connection = sqlite3.connect(path)
+        try:
             connection.execute(
                 """
                 CREATE TABLE logs (
@@ -58,6 +59,9 @@ class CodexTests(unittest.TestCase):
                 """,
                 records,
             )
+            connection.commit()
+        finally:
+            connection.close()
         return path
 
     def test_tail_records_returns_only_requested_valid_dicts(self):
@@ -345,8 +349,12 @@ class CodexTests(unittest.TestCase):
         malformed = self.root / "malformed.sqlite"
         malformed.write_text("not sqlite")
         wrong_schema = self.root / "wrong.sqlite"
-        with sqlite3.connect(wrong_schema) as connection:
+        connection = sqlite3.connect(wrong_schema)
+        try:
             connection.execute("CREATE TABLE unrelated (value TEXT)")
+            connection.commit()
+        finally:
+            connection.close()
 
         for path in (self.root / "missing.sqlite", malformed, wrong_schema):
             with self.subTest(path=path):
