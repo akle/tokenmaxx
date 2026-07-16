@@ -33,12 +33,12 @@ tokenmaxx/
    `transcript.tail_records` bounds the event-tail reads for detection and
    activity checks.
 3. `claude.session_limit_hit_at` walks Claude transcript tail records from the end
-   and reports a limit (with the banner's timestamp) only when the last
-   assistant activity is a synthetic limit banner
-   (`message.model == "<synthetic>"`, classified by `queue.classify_output`).
-   Regular messages that merely mention limit phrases never queue a session,
-   and a real assistant record after the banner means the session already
-   resumed.
+   and reports a stop event (with its timestamp) only when the last assistant
+   activity is a synthetic limit banner or the exact synthetic
+   `API Error: Unable to connect to API (ConnectionRefused)` record
+   (`message.model == "<synthetic>"`). Regular messages that merely mention
+   limit or connection-error phrases never queue a session, and a real
+   assistant record after the stop event means the session already resumed.
 4. `codex.session_limit_hit_at` accepts a terminal provider-authored
    `event_msg` error with structured code `usage_limit_exceeded`, the exact
    provider usage-limit prefix when the structured code is absent, or an

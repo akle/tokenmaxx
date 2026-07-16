@@ -53,7 +53,10 @@ continuation globally per queue.
 
 ## Detection Boundary
 
-Claude Code auto-queue accepts only terminal synthetic assistant limit banners.
+Claude Code auto-queue accepts only terminal synthetic assistant limit banners
+or the exact synthetic `ConnectionRefused` API error. Regular user/assistant
+text, tool output, and file content that mentions a limit or connection error
+does not trigger a queue entry.
 Codex auto-queue accepts terminal provider-authored error events with the
 structured `usage_limit_exceeded` code, the exact provider-authored usage-limit
 prefix when a Codex version omits that code, provider-authored

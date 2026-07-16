@@ -56,6 +56,7 @@ def find_transcript(projects_dir: Path, session_id: str) -> Path | None:
 
 
 SYNTHETIC_MODEL = "<synthetic>"
+CONNECTION_REFUSED_ERROR_PREFIX = "API Error: Unable to connect to API (ConnectionRefused)"
 
 
 def message_text(message: dict) -> str:
@@ -69,6 +70,15 @@ def message_text(message: dict) -> str:
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
     return ""
+
+
+def is_connection_refused_error(record: dict) -> bool:
+    message = record.get("message")
+    if record.get("type") != "assistant" or not isinstance(message, dict):
+        return False
+    if message.get("model") != SYNTHETIC_MODEL:
+        return False
+    return message_text(message).strip().startswith(CONNECTION_REFUSED_ERROR_PREFIX)
 
 
 def session_limit_hit_at(session: dict, projects_dir: Path) -> int | None:
@@ -88,6 +98,8 @@ def session_limit_hit_at(session: dict, projects_dir: Path) -> int | None:
         if record.get("type") != "assistant" or not isinstance(message, dict):
             continue
         if message.get("model") == SYNTHETIC_MODEL:
+            if is_connection_refused_error(record):
+                return record_timestamp(record)
             if classify_output(message_text(message)) == "limited":
                 return record_timestamp(record)
             continue

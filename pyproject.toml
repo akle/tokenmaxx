@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tokenmaxx"
-version = "0.5.4"
+version = "0.5.5"
 description = "Limit-aware resume queue for Claude Code and Codex sessions"
 readme = "README.md"
 requires-python = ">=3.10"

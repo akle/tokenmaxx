@@ -16,7 +16,7 @@ DEFAULT_PROMPT = """Continue this Claude Code session only if unfinished.
 
 First inspect the current repo/session state and decide whether work remains.
 If the prior task is already complete, say DONE and stop.
-If it hit a usage/rate/session limit before finishing, resume the remaining work.
+If it hit a usage/rate/session limit or a transient provider connection failure before finishing, resume the remaining work.
 Before long work, write or update a checkpoint with completed work and next steps.
 Keep the response concise and operational."""
 

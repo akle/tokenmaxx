@@ -374,6 +374,42 @@ class TokenmaxxTests(unittest.TestCase):
             "limit",
         )
 
+    def test_claude_connection_refused_requires_synthetic_provider_record(self):
+        provider_error = json.loads(
+            synthetic_line("API Error: Unable to connect to API (ConnectionRefused)")
+        )
+        regular_message = json.loads(assistant_line("API Error: Unable to connect to API (ConnectionRefused)"))
+
+        self.assertTrue(claude.is_connection_refused_error(provider_error))
+        self.assertFalse(claude.is_connection_refused_error(regular_message))
+
+    def test_autoqueue_adds_claude_connection_refused_error(self):
+        self.write_session(
+            "connection-refused.json",
+            {
+                "pid": DEAD_PID,
+                "status": "idle",
+                "cwd": "/tmp/connection-refused",
+                "sessionId": "connection-refused",
+                "updatedAt": 999_000,
+            },
+        )
+        self.write_transcript(
+            "connection-refused",
+            synthetic_line(
+                "API Error: Unable to connect to API (ConnectionRefused)",
+                timestamp="1970-01-01T00:16:39Z",
+            ),
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli.cmd_autoqueue(self.args(now=1000, max_session_age_hours=1))
+
+        self.assertEqual(code, 0)
+        self.assertIn("Auto-queued 1 session", output.getvalue())
+        self.assertEqual(load_queue(self.queue_path)[0].key, ("claude", "connection-refused"))
+
     def test_find_transcript_skips_file_deleted_mid_scan(self):
         project_dir = self.projects_dir / "project"
         project_dir.mkdir()
@@ -947,7 +983,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(drop_args.provider, "codex")
 
     def test_package_version_is_patch_release(self):
-        self.assertEqual(cli.__version__, "0.5.4")
+        self.assertEqual(cli.__version__, "0.5.5")
 
     def test_watch_defers_item_owned_by_busy_session(self):
         now = 1_000_000

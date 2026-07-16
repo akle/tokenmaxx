@@ -22,7 +22,7 @@ limit reset, and type "continue" later.
 
 1. Find recent Claude Code and Codex sessions.
 2. Read bounded transcript tails and Codex history records for provider-authored stop events.
-3. Queue only terminal Claude limit banners, structured Codex limit errors, or the exact Codex remote-compaction disconnect record.
+3. Queue only terminal Claude limit banners or provider connection failures, structured Codex limit errors, or known Codex remote-compaction disconnect records.
 4. Resume due sessions later with a prompt that first asks the provider to verify whether work remains.
 5. Back off on limit output and block noisy sessions after repeated attempts.
 
@@ -139,9 +139,10 @@ tokenmaxx watch
 - Auto-queue reads Claude Code session metadata in `~/.claude/sessions`, Claude
   transcript tails in `~/.claude/projects`, and Codex rollout files under
   `~/.codex/sessions` plus the bounded `~/.codex/history.jsonl` history tail.
-- Auto-queue only queues sessions whose transcript ends on a Claude limit banner
-  (a synthetic assistant record). Sessions that merely *mention* limits in
-  regular messages, tool output, or file contents are not queued.
+- Auto-queue only queues sessions whose transcript ends on a Claude limit
+  banner or the exact synthetic `ConnectionRefused` API error. Sessions that
+  merely mention limits or connection errors in regular messages, tool output,
+  or file contents are not queued.
 - Codex auto-queue accepts a terminal provider-authored `event_msg` error with
   structured code `usage_limit_exceeded`, the exact provider-authored
   usage-limit error prefix when the code is omitted, or a `token_count` event
@@ -186,7 +187,7 @@ Continue this Claude Code session only if unfinished.
 
 First inspect the current repo/session state and decide whether work remains.
 If the prior task is already complete, say DONE and stop.
-If it hit a usage/rate/session limit before finishing, resume the remaining work.
+If it hit a usage/rate/session limit or a transient provider connection failure before finishing, resume the remaining work.
 Before long work, write or update a checkpoint with completed work and next steps.
 Keep the response concise and operational.
 ```
@@ -199,7 +200,7 @@ Continue this Codex session only if unfinished.
 
 First inspect the current repo/session state and decide whether work remains.
 If the prior task is already complete, respond with exactly STATUS: DONE and stop.
-If it hit a usage limit before finishing, resume the remaining work.
+If it hit a usage limit or a transient remote compaction/transport failure before finishing, resume the remaining work.
 Do not change or bypass the configured sandbox or approval settings.
 When the task is complete, end with exactly STATUS: DONE.
 ```
