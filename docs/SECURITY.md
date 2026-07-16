@@ -58,10 +58,10 @@ Codex auto-queue accepts terminal provider-authored error events with the
 structured `usage_limit_exceeded` code, the exact provider-authored usage-limit
 prefix when a Codex version omits that code, provider-authored
 `token_count.rate_limits` telemetry showing an exhausted window with a future
-reset, or the exact remote-compaction disconnect record in Codex history. User
-prompts, assistant text, tool output, file content, generic errors, and
-model-capacity errors must never trigger a queue entry merely because they
-mention a limit or transport failure.
+reset, or one of the known remote-compaction disconnect records in Codex
+history. User prompts, assistant text, tool output, file content, generic
+errors, and model-capacity errors must never trigger a queue entry merely
+because they mention a limit or transport failure.
 
 ## Launchd Boundary
 

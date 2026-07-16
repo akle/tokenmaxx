@@ -12,9 +12,10 @@ from .transcript import record_timestamp, tail_records
 ACTIVE_STALENESS_SECONDS = 24 * 60 * 60
 HISTORY_SCAN_MAX_LINES = 2_000
 ROLLOUT_ACTIVITY_SCAN_MAX_LINES = 2_000
-REMOTE_COMPACT_ERROR_PREFIX = (
-    "\u25a0 Error running remote compact task: stream disconnected before completion: "
-    "error sending request for url"
+REMOTE_COMPACT_ERROR_BODY = "stream disconnected before completion: error sending request for url"
+REMOTE_COMPACT_ERROR_PREFIXES = (
+    f"\u25a0 Error running remote compact task: {REMOTE_COMPACT_ERROR_BODY}",
+    f"\u25a0 {REMOTE_COMPACT_ERROR_BODY}",
 )
 REMOTE_COMPACT_ERROR_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -30,10 +31,12 @@ def is_usage_limit_error(payload: dict) -> bool:
 
 
 def is_remote_compact_disconnect(text: object) -> bool:
+    if not isinstance(text, str):
+        return False
+    normalized = text.strip()
     return (
-        isinstance(text, str)
-        and text.startswith(REMOTE_COMPACT_ERROR_PREFIX)
-        and REMOTE_COMPACT_ERROR_URL in text
+        normalized.startswith(REMOTE_COMPACT_ERROR_PREFIXES)
+        and REMOTE_COMPACT_ERROR_URL in normalized
     )
 
 

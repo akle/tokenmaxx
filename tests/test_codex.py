@@ -148,6 +148,12 @@ class CodexTests(unittest.TestCase):
         )
 
         self.assertTrue(codex.is_remote_compact_disconnect(message))
+        self.assertTrue(
+            codex.is_remote_compact_disconnect(
+                "\u25a0 stream disconnected before completion: error sending request for url "
+                "(https://chatgpt.com/backend-api/codex/responses)"
+            )
+        )
         self.assertFalse(codex.is_remote_compact_disconnect("stream disconnected before completion"))
         self.assertFalse(codex.is_remote_compact_disconnect(message.replace("remote compact", "remote request")))
 
@@ -159,8 +165,7 @@ class CodexTests(unittest.TestCase):
                     "session_id": "codex-1",
                     "ts": 980,
                     "text": (
-                        "\u25a0 Error running remote compact task: stream disconnected before completion: "
-                        "error sending request for url\n"
+                        "\u25a0 stream disconnected before completion: error sending request for url "
                         "(https://chatgpt.com/backend-api/codex/responses)"
                     ),
                 }

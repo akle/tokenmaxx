@@ -146,10 +146,9 @@ tokenmaxx watch
   structured code `usage_limit_exceeded`, the exact provider-authored
   usage-limit error prefix when the code is omitted, or a `token_count` event
   whose rate-limit window is exhausted and has a future reset. It also accepts
-  the exact `Error running remote compact task` disconnect record in
-  `~/.codex/history.jsonl` when the rollout has no newer task activity. Generic
-  errors, model-capacity errors, and limit text in user, assistant, tool, or
-  file content are ignored.
+  the known remote-compaction disconnect records in `~/.codex/history.jsonl`
+  when the rollout has no newer task activity. Generic, model-capacity, and
+  unrelated limit text in user, assistant, tool, or file content are ignored.
 - A session whose queue row is already `done` or `blocked` is re-armed with
   fresh attempts when it hits a *new* limit (banner newer than the row).
   Sessions you `drop` are never re-armed.

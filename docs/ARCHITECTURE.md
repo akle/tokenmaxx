@@ -44,8 +44,8 @@ tokenmaxx/
    provider usage-limit prefix when the structured code is absent, or an
    exhausted `token_count.rate_limits` window with a future reset. Generic and
    model-capacity errors are ignored; a later task start suppresses an old
-   limit. `codex.load_remote_compact_events` additionally reads the exact
-   remote-compaction stream-disconnect record from `history.jsonl`; a later
+   limit. `codex.load_remote_compact_events` additionally reads the known
+   remote-compaction stream-disconnect records from `history.jsonl`; a later
    rollout `task_started` or `task_complete` suppresses that history event.
    Telemetry-backed queue rows wait until the reported reset plus the normal
    reset buffer.
