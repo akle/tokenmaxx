@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from .config import CODEX_PROMPT
@@ -18,6 +19,10 @@ REMOTE_COMPACT_ERROR_PREFIXES = (
     f"\u25a0 {REMOTE_COMPACT_ERROR_BODY}",
 )
 REMOTE_COMPACT_ERROR_URL = "https://chatgpt.com/backend-api/codex/responses"
+MODEL_CAPACITY_LOG_TARGET = "codex_core::session::turn"
+MODEL_CAPACITY_ERROR = "Selected model is at capacity. Please try a different model."
+MODEL_CAPACITY_LOG_SUFFIX = f"Turn error: {MODEL_CAPACITY_ERROR}"
+MODEL_CAPACITY_RETRY_SECONDS = 5 * 60
 
 
 def is_usage_limit_error(payload: dict) -> bool:
@@ -76,6 +81,44 @@ def load_remote_compact_events(
         ):
             continue
         events[session_id] = max(hit_at, events.get(session_id, 0))
+    return events
+
+
+def load_model_capacity_events(
+    logs_path: Path | None,
+    session_ids: set[str],
+    *,
+    now: int,
+    max_session_age_hours: float,
+) -> dict[str, int]:
+    if logs_path is None or not session_ids:
+        return {}
+    oldest = now - int(float(max_session_age_hours) * 60 * 60)
+    events: dict[str, int] = {}
+    database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(database_uri, uri=True, timeout=0)
+        try:
+            for session_id in session_ids:
+                rows = connection.execute(
+                    """
+                    SELECT ts, feedback_log_body
+                    FROM logs
+                    WHERE thread_id = ?
+                      AND ts BETWEEN ? AND ?
+                      AND target = ?
+                    ORDER BY ts DESC, ts_nanos DESC, id DESC
+                    """,
+                    (session_id, oldest, now, MODEL_CAPACITY_LOG_TARGET),
+                )
+                for raw_hit_at, body in rows:
+                    if isinstance(body, str) and body.endswith(MODEL_CAPACITY_LOG_SUFFIX):
+                        events[session_id] = int(raw_hit_at)
+                        break
+        finally:
+            connection.close()
+    except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        return {}
     return events
 
 
@@ -234,6 +277,25 @@ def remote_compact_hit_at(session: dict, events: dict[str, int]) -> int | None:
     return hit_at
 
 
+def reschedule_pending_capacity_item(
+    items: list[QueueItem],
+    *,
+    session_id: str,
+    hit_at: int,
+    retry_at: int,
+) -> QueueItem | None:
+    for existing in reversed(items):
+        if existing.key != ("codex", session_id):
+            continue
+        if existing.status != "pending" or hit_at < existing.updated_at:
+            return None
+        if existing.next_attempt_at == 0 or existing.next_attempt_at <= retry_at:
+            return None
+        existing.next_attempt_at = retry_at
+        return existing
+    return None
+
+
 def build_limited_queue_items(
     sessions: list[dict],
     items: list[QueueItem],
@@ -241,10 +303,17 @@ def build_limited_queue_items(
     now: int,
     max_session_age_hours: float,
     history_path: Path | None = None,
+    logs_path: Path | None = None,
 ) -> list[QueueItem]:
     max_age_seconds = int(float(max_session_age_hours) * 60 * 60)
     compact_events = load_remote_compact_events(
         history_path,
+        now=now,
+        max_session_age_hours=max_session_age_hours,
+    )
+    capacity_events = load_model_capacity_events(
+        logs_path,
+        {str(session.get("sessionId") or "") for session in sessions},
         now=now,
         max_session_age_hours=max_session_age_hours,
     )
@@ -260,6 +329,11 @@ def build_limited_queue_items(
         compact_hit_at = remote_compact_hit_at(session, compact_events)
         if compact_hit_at is not None and (info is None or compact_hit_at > info[0]):
             info = (compact_hit_at, None)
+        capacity_retry_at = None
+        capacity_hit_at = remote_compact_hit_at(session, capacity_events)
+        if capacity_hit_at is not None and (info is None or capacity_hit_at > info[0]):
+            info = (capacity_hit_at, None)
+            capacity_retry_at = capacity_hit_at + MODEL_CAPACITY_RETRY_SECONDS
         if info is None:
             continue
         hit_at, retry_at = info
@@ -271,14 +345,59 @@ def build_limited_queue_items(
             hit_at=hit_at,
             now=now,
         )
+        if item is None and capacity_retry_at is not None:
+            item = reschedule_pending_capacity_item(
+                items,
+                session_id=session_id,
+                hit_at=hit_at,
+                retry_at=capacity_retry_at,
+            )
         if item is not None:
-            if retry_at is not None and retry_at > now:
+            if capacity_retry_at is not None and capacity_retry_at > now:
+                item.next_attempt_at = capacity_retry_at
+            elif retry_at is not None and retry_at > now:
                 item.next_attempt_at = retry_at + RESET_BUFFER_SECONDS
             affected.append(item)
     return affected
 
 
-def session_is_active(session: dict, now: int, grace_seconds: int) -> bool:
+def latest_external_stop_at(
+    session: dict,
+    *,
+    history_path: Path | None,
+    logs_path: Path | None,
+    now: int,
+    max_session_age_hours: float,
+) -> int | None:
+    session_id = str(session.get("sessionId") or "")
+    compact_events = load_remote_compact_events(
+        history_path,
+        now=now,
+        max_session_age_hours=max_session_age_hours,
+    )
+    capacity_events = load_model_capacity_events(
+        logs_path,
+        {session_id} if session_id else set(),
+        now=now,
+        max_session_age_hours=max_session_age_hours,
+    )
+    candidates = [
+        hit_at
+        for hit_at in (
+            remote_compact_hit_at(session, compact_events),
+            remote_compact_hit_at(session, capacity_events),
+        )
+        if hit_at is not None
+    ]
+    return max(candidates) if candidates else None
+
+
+def session_is_active(
+    session: dict,
+    now: int,
+    grace_seconds: int,
+    external_stop_at: int | None = None,
+) -> bool:
     path = session.get("_path")
     if not path:
         return now - session_updated_at_seconds(session) < grace_seconds
@@ -287,6 +406,10 @@ def session_is_active(session: dict, now: int, grace_seconds: int) -> bool:
         return False
     records = tail_records(rollout_path)
     if not rollout_path.is_file():
+        return False
+    if external_stop_at is not None and not session_has_newer_task_activity(
+        session, external_stop_at
+    ):
         return False
     for record in reversed(records):
         if record.get("type") != "event_msg":
@@ -313,9 +436,22 @@ def find_active_session(
     session_id: str,
     now: int,
     grace_seconds: int,
+    *,
+    history_path: Path | None = None,
+    logs_path: Path | None = None,
+    max_session_age_hours: float = 24.0,
 ) -> dict | None:
     for session in sessions:
-        if str(session.get("sessionId")) == session_id and session_is_active(session, now, grace_seconds):
+        if str(session.get("sessionId")) != session_id:
+            continue
+        external_stop_at = latest_external_stop_at(
+            session,
+            history_path=history_path,
+            logs_path=logs_path,
+            now=now,
+            max_session_age_hours=max_session_age_hours,
+        )
+        if session_is_active(session, now, grace_seconds, external_stop_at):
             return session
     return None
 

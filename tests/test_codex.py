@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,30 @@ class CodexTests(unittest.TestCase):
     def write_history(self, records):
         path = self.root / "history.jsonl"
         path.write_text("".join(json.dumps(record) + "\n" for record in records))
+        return path
+
+    def write_logs_db(self, records):
+        path = self.root / "logs_2.sqlite"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts INTEGER NOT NULL,
+                    ts_nanos INTEGER NOT NULL,
+                    target TEXT NOT NULL,
+                    thread_id TEXT,
+                    feedback_log_body TEXT
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO logs (ts, ts_nanos, target, thread_id, feedback_log_body)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                records,
+            )
         return path
 
     def test_tail_records_returns_only_requested_valid_dicts(self):
@@ -213,6 +238,216 @@ class CodexTests(unittest.TestCase):
         )
 
         self.assertEqual(items, [])
+
+    def test_exact_model_capacity_log_queues_same_thread_after_five_minutes(self):
+        self.write_rollout()
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    10,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    "session_loop{thread_id=codex-1}: Turn error: "
+                    "Selected model is at capacity. Please try a different model.",
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        affected = codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            logs_path=logs,
+        )
+
+        self.assertEqual(affected, items)
+        self.assertEqual(items[0].key, ("codex", "codex-1"))
+        self.assertEqual(items[0].next_attempt_at, 1280)
+
+    def test_newer_rollout_activity_suppresses_model_capacity_log(self):
+        self.write_rollout(records=(event("task_started", "1970-01-01T00:16:30Z"),))
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    0,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    "Turn error: Selected model is at capacity. Please try a different model.",
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            logs_path=logs,
+        )
+
+        self.assertEqual(items, [])
+
+    def test_model_capacity_stop_makes_open_rollout_turn_inactive(self):
+        self.write_rollout(records=(event("task_started", "1970-01-01T00:16:10Z"),))
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    0,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    "Turn error: Selected model is at capacity. Please try a different model.",
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+
+        active = codex.find_active_session(
+            sessions,
+            "codex-1",
+            1000,
+            30,
+            logs_path=logs,
+            max_session_age_hours=1,
+        )
+
+        self.assertIsNone(active)
+
+    def test_model_capacity_loader_ignores_untrusted_stale_and_partial_rows(self):
+        logs = self.write_logs_db(
+            [
+                (980, 0, "codex_core::session::handlers", "codex-1", codex.MODEL_CAPACITY_LOG_SUFFIX),
+                (980, 0, "codex_core::session::turn", None, codex.MODEL_CAPACITY_LOG_SUFFIX),
+                (980, 0, "codex_core::session::turn", "codex-1", codex.MODEL_CAPACITY_ERROR),
+                (980, 0, "codex_core::session::turn", "codex-1", codex.MODEL_CAPACITY_LOG_SUFFIX + " copied"),
+                (1, 0, "codex_core::session::turn", "codex-1", codex.MODEL_CAPACITY_LOG_SUFFIX),
+            ]
+        )
+
+        self.assertEqual(
+            codex.load_model_capacity_events(
+                logs,
+                {"codex-1"},
+                now=1000,
+                max_session_age_hours=0.01,
+            ),
+            {},
+        )
+
+    def test_model_capacity_loader_tolerates_missing_malformed_locked_and_bad_schema(self):
+        malformed = self.root / "malformed.sqlite"
+        malformed.write_text("not sqlite")
+        wrong_schema = self.root / "wrong.sqlite"
+        with sqlite3.connect(wrong_schema) as connection:
+            connection.execute("CREATE TABLE unrelated (value TEXT)")
+
+        for path in (self.root / "missing.sqlite", malformed, wrong_schema):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    codex.load_model_capacity_events(
+                        path,
+                        {"codex-1"},
+                        now=1000,
+                        max_session_age_hours=1,
+                    ),
+                    {},
+                )
+
+        for error in (PermissionError("unreadable"), sqlite3.OperationalError("database is locked")):
+            with self.subTest(error=error), patch("tokenmaxx.codex.sqlite3.connect", side_effect=error):
+                self.assertEqual(
+                    codex.load_model_capacity_events(
+                        self.root / "logs.sqlite",
+                        {"codex-1"},
+                        now=1000,
+                        max_session_age_hours=1,
+                    ),
+                    {},
+                )
+
+    def test_newer_model_capacity_event_rearms_resolved_item(self):
+        self.write_rollout()
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    0,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        items = [
+            QueueItem(
+                cwd="/tmp/repo",
+                session_id="codex-1",
+                provider="codex",
+                status="blocked",
+                attempts=5,
+                blocked_reason="max attempts (5) reached",
+                updated_at=900,
+            )
+        ]
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+
+        codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            logs_path=logs,
+        )
+
+        self.assertEqual(items[0].status, "pending")
+        self.assertEqual(items[0].attempts, 0)
+        self.assertEqual(items[0].next_attempt_at, 1280)
+
+    def test_model_capacity_event_reschedules_pending_item_without_resetting_attempts(self):
+        self.write_rollout()
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    0,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        items = [
+            QueueItem(
+                cwd="/tmp/repo",
+                session_id="codex-1",
+                provider="codex",
+                status="pending",
+                attempts=2,
+                next_attempt_at=1880,
+                updated_at=980,
+            )
+        ]
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+
+        affected = codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            logs_path=logs,
+        )
+
+        self.assertEqual(affected, items)
+        self.assertEqual(items[0].attempts, 2)
+        self.assertEqual(items[0].updated_at, 980)
+        self.assertEqual(items[0].next_attempt_at, 1280)
 
     def test_history_remote_compact_disconnect_ignores_stale_and_unrelated_records(self):
         self.write_rollout()
