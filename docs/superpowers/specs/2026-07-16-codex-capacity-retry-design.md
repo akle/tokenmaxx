@@ -57,12 +57,19 @@ queue re-arm logic. Existing safeguards still apply:
 - a user-dropped tombstone never re-arms; and
 - provider/session composite identity prevents cross-provider collisions.
 
+If a new trusted capacity event arrives while its queue row is still pending,
+tokenmaxx may move that row's next attempt earlier to the event's five-minute
+mark. It does not reset the row's attempt count or delay a retry that is already
+due sooner, so bounded attempts and queue deduplication remain intact.
+
 ## Retry Behavior
 
 A newly queued capacity event becomes due five minutes after the provider log
 timestamp. If the timestamp is already more than five minutes old, it is due on
-the next watch cycle. Before dispatch, the normal Codex activity check still
-defers an active session.
+the next watch cycle. Before dispatch, the Codex activity check reloads the
+trusted external stop sources. A capacity or remote-compaction stop newer than
+the rollout's last `task_started` record makes that unfinished turn inactive;
+rollout activity newer than the stop still defers the resume.
 
 The resume command remains:
 
@@ -72,7 +79,8 @@ codex exec resume --all <session-id> <guarded-prompt>
 
 No `--model` override is added. Codex therefore resumes the same thread with
 its existing model selection. A repeated capacity failure is discovered as a
-new event and follows the existing bounded-attempt queue policy.
+new event, targets five minutes after that event, and preserves the existing
+bounded-attempt count.
 
 ## Configuration And Launchd
 
@@ -108,6 +116,8 @@ Tests create synthetic SQLite databases and rollout records. Coverage includes:
 - the retry time is five minutes after the event;
 - later rollout activity suppresses an older capacity row;
 - a newer capacity row re-arms a resolved queue item;
+- a repeated capacity row moves a pending retry to the five-minute mark without
+  resetting attempts;
 - wrong target, missing thread ID, partial text, user/history text, and stale
   rows do not queue;
 - missing, locked, malformed, and incompatible databases fail open for the
