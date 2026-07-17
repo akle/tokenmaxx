@@ -1,5 +1,11 @@
 # Codex Model-Capacity Retry
 
+> **Human ruling after task review (2026-07-16):** A qualifying fresh capacity
+> event replaces an already-pending item's schedule with exactly
+> `hit_at + 300`, whether its current retry is due, earlier, or later. It
+> preserves `attempts` and `updated_at`. Logs-path expansion, resolution, and
+> SQLite URI construction are part of the loader's guarded failure boundary.
+
 ## Goal
 
 Make tokenmaxx automatically retry an unfinished Codex session when the
@@ -33,7 +39,9 @@ whose:
 tokenmaxx reads the database in SQLite read-only mode. The match is exact and
 anchored to the expected target and `Turn error:` suffix. A user copying the
 same banner into a prompt, `history.jsonl`, a source file, or tool output cannot
-create a capacity event.
+create a capacity event. Path expansion, resolution, URI construction, and
+database access share the same fail-open boundary, so path-preparation failures
+also produce no capacity events.
 
 ## Discovery And Data Flow
 
@@ -58,9 +66,10 @@ queue re-arm logic. Existing safeguards still apply:
 - provider/session composite identity prevents cross-provider collisions.
 
 If a new trusted capacity event arrives while its queue row is still pending,
-tokenmaxx may move that row's next attempt earlier to the event's five-minute
-mark. It does not reset the row's attempt count or delay a retry that is already
-due sooner, so bounded attempts and queue deduplication remain intact.
+tokenmaxx sets that row's next attempt to exactly the event's five-minute mark,
+whether the current retry is already due, scheduled earlier, or scheduled
+later. It does not reset the row's attempt count or change its last-outcome
+timestamp, so bounded attempts and queue deduplication remain intact.
 
 ## Retry Behavior
 
@@ -99,9 +108,10 @@ foreground and daemon behavior stay identical.
 
 - A missing database produces no capacity events and does not fail the watch
   cycle.
-- An unreadable, locked, malformed, or schema-incompatible database is treated
-  as temporarily unavailable; tokenmaxx skips capacity discovery and continues
-  processing rollout and history signals.
+- A path-preparation `OSError` or `RuntimeError`, or an unreadable, locked,
+  malformed, or schema-incompatible database, is treated as temporarily
+  unavailable; tokenmaxx skips capacity discovery and continues processing
+  rollout and history signals.
 - Rows with a missing thread ID, non-matching target, or non-exact message are
   ignored.
 - Stale rows outside `--max-session-age-hours` are ignored.
@@ -116,12 +126,13 @@ Tests create synthetic SQLite databases and rollout records. Coverage includes:
 - the retry time is five minutes after the event;
 - later rollout activity suppresses an older capacity row;
 - a newer capacity row re-arms a resolved queue item;
-- a repeated capacity row moves a pending retry to the five-minute mark without
-  resetting attempts;
+- a repeated capacity row sets due, earlier, and later pending schedules to the
+  exact five-minute mark without resetting attempts or changing `updated_at`;
 - wrong target, missing thread ID, partial text, user/history text, and stale
   rows do not queue;
 - missing, locked, malformed, and incompatible databases fail open for the
-  daemon while producing no capacity event;
+  daemon while producing no capacity event, including path-preparation
+  `OSError` and `RuntimeError` failures;
 - CLI parsing and launchd plists carry `--codex-logs-db`; and
 - the existing model-capacity rollout test continues proving that ordinary
   rollout errors are not misclassified as usage limits.

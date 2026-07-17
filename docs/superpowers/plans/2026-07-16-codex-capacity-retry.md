@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Human ruling after task review (2026-07-16):** A qualifying fresh capacity
+> event sets an already-pending item's retry to exactly `hit_at + 300`, even
+> when its current retry is due or scheduled sooner; `attempts` and `updated_at`
+> remain unchanged. Logs-path expansion, resolution, and URI construction must
+> remain inside the loader's guarded failure boundary.
+
 **Goal:** Queue an unfinished Codex thread from an exact provider-authored model-capacity log event and retry the same model after five minutes.
 
 **Architecture:** Add a bounded, read-only SQLite event loader to the Codex provider. Merge its thread-scoped events into the existing queue/re-arm path, then plumb the database path through the CLI and launchd exactly like the existing Codex history path.
@@ -13,10 +19,11 @@
 - Match only `target == "codex_core::session::turn"` rows whose body ends with `Turn error: Selected model is at capacity. Please try a different model.`
 - Read `~/.codex/logs_2.sqlite` in SQLite read-only mode; never create, migrate, or mutate the database.
 - Retry the same thread and model five minutes after the provider event; never pass a model override.
+- For a qualifying fresh capacity event, replace any different pending retry schedule with exactly `hit_at + 300`, preserving `attempts` and `updated_at`.
 - Never infer model capacity from `history.jsonl`, rollout user/assistant/tool content, or copied error text.
 - Suppress an event when the rollout has newer `task_started` or `task_complete` activity.
 - Preserve queue deduplication, user-drop tombstones, bounded attempts, global resume locking, and normal active-session deferral.
-- Missing, locked, malformed, unreadable, or schema-incompatible databases produce no capacity events and do not stop the daemon.
+- Path-preparation failures and missing, locked, malformed, unreadable, or schema-incompatible databases produce no capacity events and do not stop the daemon.
 - Add no runtime dependency.
 - Follow TDD: every production behavior starts with a failing test that is observed failing for the expected reason.
 
@@ -205,8 +212,8 @@ def load_model_capacity_events(
         return {}
     oldest = now - int(float(max_session_age_hours) * 60 * 60)
     events: dict[str, int] = {}
-    database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
     try:
+        database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
         connection = sqlite3.connect(database_uri, uri=True, timeout=0)
         try:
             for session_id in session_ids:
@@ -329,8 +336,9 @@ Expected: 3 tests pass.
 - [ ] **Step 6: Write failing trust-boundary, resilience, and re-arm tests**
 
 Add tests covering exact target/body/thread matching, stale rows, unreadable
-databases, a newer event re-arming a resolved item, and a repeated failure
-moving an already-pending retry to the five-minute mark:
+databases and path-preparation failures, a newer event re-arming a resolved
+item, and a repeated failure setting due, earlier, and later pending schedules
+to the exact five-minute mark:
 
 ```python
     def test_model_capacity_loader_ignores_untrusted_stale_and_partial_rows(self):
@@ -385,6 +393,21 @@ moving an already-pending retry to the five-minute mark:
                     {},
                 )
 
+    def test_model_capacity_loader_tolerates_path_preparation_failures(self):
+        for error in (OSError("unreadable path"), RuntimeError("path resolution failed")):
+            with self.subTest(error=error), patch(
+                "tokenmaxx.codex.Path.resolve", side_effect=error
+            ):
+                self.assertEqual(
+                    codex.load_model_capacity_events(
+                        self.root / "logs.sqlite",
+                        {"codex-1"},
+                        now=1000,
+                        max_session_age_hours=1,
+                    ),
+                    {},
+                )
+
     def test_newer_model_capacity_event_rearms_resolved_item(self):
         self.write_rollout()
         logs = self.write_logs_db(
@@ -423,7 +446,7 @@ moving an already-pending retry to the five-minute mark:
         self.assertEqual(items[0].attempts, 0)
         self.assertEqual(items[0].next_attempt_at, 1280)
 
-    def test_model_capacity_event_reschedules_pending_item_without_resetting_attempts(self):
+    def test_model_capacity_event_sets_exact_pending_retry_without_resetting_attempts(self):
         self.write_rollout()
         logs = self.write_logs_db(
             [
@@ -436,31 +459,34 @@ moving an already-pending retry to the five-minute mark:
                 )
             ]
         )
-        items = [
-            QueueItem(
-                cwd="/tmp/repo",
-                session_id="codex-1",
-                provider="codex",
-                status="pending",
-                attempts=2,
-                next_attempt_at=1880,
-                updated_at=980,
-            )
-        ]
         sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
 
-        affected = codex.build_limited_queue_items(
-            sessions,
-            items,
-            now=1000,
-            max_session_age_hours=1,
-            logs_path=logs,
-        )
+        for existing_retry in (0, 1200, 1880):
+            with self.subTest(existing_retry=existing_retry):
+                items = [
+                    QueueItem(
+                        cwd="/tmp/repo",
+                        session_id="codex-1",
+                        provider="codex",
+                        status="pending",
+                        attempts=2,
+                        next_attempt_at=existing_retry,
+                        updated_at=980,
+                    )
+                ]
 
-        self.assertEqual(affected, items)
-        self.assertEqual(items[0].attempts, 2)
-        self.assertEqual(items[0].updated_at, 980)
-        self.assertEqual(items[0].next_attempt_at, 1280)
+                affected = codex.build_limited_queue_items(
+                    sessions,
+                    items,
+                    now=1000,
+                    max_session_age_hours=1,
+                    logs_path=logs,
+                )
+
+                self.assertEqual(affected, items)
+                self.assertEqual(items[0].attempts, 2)
+                self.assertEqual(items[0].updated_at, 980)
+                self.assertEqual(items[0].next_attempt_at, 1280)
 ```
 
 - [ ] **Step 7: Implement pending-item rescheduling**
@@ -480,7 +506,7 @@ def reschedule_pending_capacity_item(
             continue
         if existing.status != "pending" or hit_at < existing.updated_at:
             return None
-        if existing.next_attempt_at == 0 or existing.next_attempt_at <= retry_at:
+        if existing.next_attempt_at == retry_at:
             return None
         existing.next_attempt_at = retry_at
         return existing

@@ -95,8 +95,8 @@ def load_model_capacity_events(
         return {}
     oldest = now - int(float(max_session_age_hours) * 60 * 60)
     events: dict[str, int] = {}
-    database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
     try:
+        database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
         connection = sqlite3.connect(database_uri, uri=True, timeout=0)
         try:
             for session_id in session_ids:
@@ -289,7 +289,7 @@ def reschedule_pending_capacity_item(
             continue
         if existing.status != "pending" or hit_at < existing.updated_at:
             return None
-        if existing.next_attempt_at == 0 or existing.next_attempt_at <= retry_at:
+        if existing.next_attempt_at == retry_at:
             return None
         existing.next_attempt_at = retry_at
         return existing

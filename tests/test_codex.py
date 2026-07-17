@@ -380,6 +380,21 @@ class CodexTests(unittest.TestCase):
                     {},
                 )
 
+    def test_model_capacity_loader_tolerates_path_preparation_failures(self):
+        for error in (OSError("unreadable path"), RuntimeError("path resolution failed")):
+            with self.subTest(error=error), patch(
+                "tokenmaxx.codex.Path.resolve", side_effect=error
+            ):
+                self.assertEqual(
+                    codex.load_model_capacity_events(
+                        self.root / "logs.sqlite",
+                        {"codex-1"},
+                        now=1000,
+                        max_session_age_hours=1,
+                    ),
+                    {},
+                )
+
     def test_newer_model_capacity_event_rearms_resolved_item(self):
         self.write_rollout()
         logs = self.write_logs_db(
@@ -418,7 +433,7 @@ class CodexTests(unittest.TestCase):
         self.assertEqual(items[0].attempts, 0)
         self.assertEqual(items[0].next_attempt_at, 1280)
 
-    def test_model_capacity_event_reschedules_pending_item_without_resetting_attempts(self):
+    def test_model_capacity_event_sets_exact_pending_retry_without_resetting_attempts(self):
         self.write_rollout()
         logs = self.write_logs_db(
             [
@@ -431,31 +446,34 @@ class CodexTests(unittest.TestCase):
                 )
             ]
         )
-        items = [
-            QueueItem(
-                cwd="/tmp/repo",
-                session_id="codex-1",
-                provider="codex",
-                status="pending",
-                attempts=2,
-                next_attempt_at=1880,
-                updated_at=980,
-            )
-        ]
         sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
 
-        affected = codex.build_limited_queue_items(
-            sessions,
-            items,
-            now=1000,
-            max_session_age_hours=1,
-            logs_path=logs,
-        )
+        for existing_retry in (0, 1200, 1880):
+            with self.subTest(existing_retry=existing_retry):
+                items = [
+                    QueueItem(
+                        cwd="/tmp/repo",
+                        session_id="codex-1",
+                        provider="codex",
+                        status="pending",
+                        attempts=2,
+                        next_attempt_at=existing_retry,
+                        updated_at=980,
+                    )
+                ]
 
-        self.assertEqual(affected, items)
-        self.assertEqual(items[0].attempts, 2)
-        self.assertEqual(items[0].updated_at, 980)
-        self.assertEqual(items[0].next_attempt_at, 1280)
+                affected = codex.build_limited_queue_items(
+                    sessions,
+                    items,
+                    now=1000,
+                    max_session_age_hours=1,
+                    logs_path=logs,
+                )
+
+                self.assertEqual(affected, items)
+                self.assertEqual(items[0].attempts, 2)
+                self.assertEqual(items[0].updated_at, 980)
+                self.assertEqual(items[0].next_attempt_at, 1280)
 
     def test_history_remote_compact_disconnect_ignores_stale_and_unrelated_records(self):
         self.write_rollout()
