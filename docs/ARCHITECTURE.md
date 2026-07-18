@@ -24,7 +24,8 @@ tokenmaxx/
 
 1. `tokenmaxx autoqueue` scans both providers: Claude metadata under
    `~/.claude/sessions`, Codex rollouts under `~/.codex/sessions`, and the
-   bounded Codex history tail in `~/.codex/history.jsonl`. When
+   bounded Codex history tail in `~/.codex/history.jsonl`, plus exact provider
+   turn failures from read-only `~/.codex/logs_2.sqlite`. When
    auto-queue is enabled, `tokenmaxx watch` scans only providers whose
    executables resolved for that invocation.
 2. For each recent Claude session, `claude.find_transcript` looks for a matching
@@ -43,10 +44,17 @@ tokenmaxx/
    `event_msg` error with structured code `usage_limit_exceeded`, the exact
    provider usage-limit prefix when the structured code is absent, or an
    exhausted `token_count.rate_limits` window with a future reset. Generic and
-   model-capacity errors are ignored; a later task start suppresses an old
-   limit. `codex.load_remote_compact_events` additionally reads the known
+   unrelated errors are ignored; a later task start suppresses an old limit.
+   `codex.load_remote_compact_events` additionally reads the known
    remote-compaction stream-disconnect records from `history.jsonl`; a later
    rollout `task_started` or `task_complete` suppresses that history event.
+   `codex.load_model_capacity_events` queries only discovered thread IDs in the
+   read-only Codex logs database and accepts only
+   `target == "codex_core::session::turn"` rows ending with the exact provider
+   `Turn error: Selected model is at capacity. Please try a different model.`
+   suffix. Newer rollout task activity suppresses both history and capacity
+   events. A capacity row is due five minutes after its timestamp and resumes
+   the same model.
    Telemetry-backed queue rows wait until the reported reset plus the normal
    reset buffer.
 5. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.

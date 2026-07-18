@@ -1017,7 +1017,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertEqual(drop_args.provider, "codex")
 
     def test_package_version_is_patch_release(self):
-        self.assertEqual(cli.__version__, "0.5.5")
+        self.assertEqual(cli.__version__, "0.5.6")
 
     def test_watch_defers_item_owned_by_busy_session(self):
         now = 1_000_000

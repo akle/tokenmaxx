@@ -137,8 +137,9 @@ tokenmaxx watch
 - Queue state lives at `~/.tokenmaxx/queue.jsonl` by default.
 - Queue writes use a sibling lock file: `queue.jsonl.lock`.
 - Auto-queue reads Claude Code session metadata in `~/.claude/sessions`, Claude
-  transcript tails in `~/.claude/projects`, and Codex rollout files under
-  `~/.codex/sessions` plus the bounded `~/.codex/history.jsonl` history tail.
+  transcript tails in `~/.claude/projects`, Codex rollout files under
+  `~/.codex/sessions`, the bounded `~/.codex/history.jsonl` history tail, and
+  exact provider turn failures from read-only `~/.codex/logs_2.sqlite`.
 - Auto-queue only queues sessions whose transcript ends on a Claude limit
   banner or the exact synthetic `ConnectionRefused` API error. Sessions that
   merely mention limits or connection errors in regular messages, tool output,
@@ -147,9 +148,12 @@ tokenmaxx watch
   structured code `usage_limit_exceeded`, the exact provider-authored
   usage-limit error prefix when the code is omitted, or a `token_count` event
   whose rate-limit window is exhausted and has a future reset. It also accepts
-  the known remote-compaction disconnect records in `~/.codex/history.jsonl`
-  when the rollout has no newer task activity. Generic, model-capacity, and
-  unrelated limit text in user, assistant, tool, or file content are ignored.
+  known remote-compaction disconnect records from `~/.codex/history.jsonl` and
+  exact `codex_core::session::turn` model-capacity failures from read-only
+  `~/.codex/logs_2.sqlite` when the rollout has no newer task activity. Generic
+  failures and matching text in user, assistant, tool, history, or file content
+  are ignored. Capacity retries keep the same model and become due five minutes
+  after the provider event.
 - A session whose queue row is already `done` or `blocked` is re-armed with
   fresh attempts when it hits a *new* limit (banner newer than the row).
   Sessions you `drop` are never re-armed.
@@ -200,7 +204,7 @@ Continue this Codex session only if unfinished.
 
 First inspect the current repo/session state and decide whether work remains.
 If the prior task is already complete, respond with exactly STATUS: DONE and stop.
-If it hit a usage limit or a transient remote compaction/transport failure before finishing, resume the remaining work.
+If it hit a usage limit, a transient remote compaction/transport failure, or temporary model capacity before finishing, resume the remaining work.
 Do not change or bypass the configured sandbox or approval settings.
 When the task is complete, end with exactly STATUS: DONE.
 ```
@@ -287,6 +291,7 @@ Common flags:
 --sessions-dir ~/.claude/sessions
 --projects-dir ~/.claude/projects
 --codex-sessions-dir ~/.codex/sessions
+--codex-logs-db ~/.codex/logs_2.sqlite
 --max-session-age-hours 24
 --retry-delay-seconds 18000
 --followup-delay-seconds 900

@@ -62,9 +62,16 @@ structured `usage_limit_exceeded` code, the exact provider-authored usage-limit
 prefix when a Codex version omits that code, provider-authored
 `token_count.rate_limits` telemetry showing an exhausted window with a future
 reset, or one of the known remote-compaction disconnect records in Codex
-history. User prompts, assistant text, tool output, file content, generic
-errors, and model-capacity errors must never trigger a queue entry merely
-because they mention a limit or transport failure.
+history. User prompts, assistant text, tool output, file content, and generic
+errors must never trigger a queue entry merely because they mention a limit or
+transport failure.
+
+Model-capacity retry is accepted only from a thread-scoped
+`codex_core::session::turn` row in the Codex logs database whose body ends with
+the exact provider `Turn error` banner. Matching text in history, user prompts,
+assistant text, tools, or files remains untrusted. The database is opened
+read-only; missing, locked, malformed, unreadable, or incompatible databases
+skip capacity discovery without stopping rollout or history detection.
 
 ## Launchd Boundary
 
