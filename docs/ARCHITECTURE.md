@@ -52,9 +52,13 @@ tokenmaxx/
    read-only Codex logs database and accepts only
    `target == "codex_core::session::turn"` rows ending with the exact provider
    `Turn error: Selected model is at capacity. Please try a different model.`
-   suffix. Newer rollout task activity suppresses both history and capacity
-   events. A capacity row is due five minutes after its timestamp and resumes
-   the same model.
+   suffix. Trusted external stops carry separate whole-second scheduling and
+   epoch-nanosecond ordering values: capacity rows preserve `ts_nanos`,
+   second-only history events use a zero fractional component, and rollout task
+   activity preserves fractional ISO timestamps. Later same-second task
+   activity therefore suppresses both history and capacity events, while
+   earlier same-second activity does not. A capacity row is due five minutes
+   after its whole-second `ts` and resumes the same model.
    Telemetry-backed queue rows wait until the reported reset plus the normal
    reset buffer.
 5. Matching sessions become `QueueItem` records in `~/.tokenmaxx/queue.jsonl`.
@@ -133,9 +137,11 @@ macOS background operation uses launchd:
 - `tokenmaxx logs` prints or follows the configured log file.
 
 The daemon command is a normal `tokenmaxx watch` invocation with queue, Claude
-sessions/projects, Codex sessions/history, lock timeout, interval, and all
-available `--claude-bin` and `--codex-bin` arguments recorded in the plist. Provider
-executables are resolved at install/start time because launchd
+sessions/projects, Codex sessions/history/logs, lock timeout, interval, and all
+available `--claude-bin` and `--codex-bin` arguments recorded in the plist. The
+`--codex-logs-db` value is expanded and resolved before serialization so
+launchd always receives an absolute path. Provider executables are resolved at
+install/start time because launchd
 does not inherit the user's interactive shell PATH. The invoking shell's `PATH`
 is also embedded in the plist's `EnvironmentVariables`, because version-manager
 shims (asdf, mise) exec their manager binary from PATH and die under launchd's

@@ -6,6 +6,12 @@
 > preserves `attempts` and `updated_at`. Logs-path expansion, resolution, and
 > SQLite URI construction are part of the loader's guarded failure boundary.
 
+> **Human ruling after final review (2026-07-18):** Freshness and external-stop
+> comparisons preserve subsecond ordering from SQLite `ts_nanos` and rollout
+> fractional ISO timestamps. Queue timestamps, age windows, and the exact
+> five-minute retry schedule continue to use whole epoch seconds. Launchd
+> serializes the resolved absolute Codex logs database path.
+
 ## Goal
 
 Make tokenmaxx automatically retry an unfinished Codex session when the
@@ -53,14 +59,21 @@ discovered session, tokenmaxx evaluates three independent provider signals:
 3. an exact model-capacity turn error from the Codex logs database.
 
 The capacity query is bounded to the discovered thread IDs and the configured
-maximum session age. It returns the newest matching timestamp per thread rather
-than loading arbitrary log content into memory.
+maximum session age. It returns the newest matching event per thread with both
+the whole-second `ts` used by queue scheduling and the `ts` plus `ts_nanos`
+ordering value used by freshness checks, rather than loading arbitrary log
+content into memory.
 
-The matching log timestamp becomes the event timestamp passed to the existing
-queue re-arm logic. Existing safeguards still apply:
+Trusted external stops share one ordering representation. Capacity events keep
+their SQLite fractional nanoseconds; second-only remote-compaction history
+events use zero fractional nanoseconds; and rollout task activity preserves its
+fractional ISO timestamp. The whole-second capacity timestamp is passed to the
+existing queue re-arm logic. Existing safeguards still apply:
 
 - a later rollout `task_started` or `task_complete` record suppresses the old
-  capacity event because the session has already progressed;
+  capacity event because the session has already progressed, including later
+  activity in the same second;
+- earlier same-second task activity does not suppress a later external stop;
 - an existing row re-arms only for a newer event;
 - a user-dropped tombstone never re-arms; and
 - provider/session composite identity prevents cross-provider collisions.
@@ -73,12 +86,12 @@ timestamp, so bounded attempts and queue deduplication remain intact.
 
 ## Retry Behavior
 
-A newly queued capacity event becomes due five minutes after the provider log
-timestamp. If the timestamp is already more than five minutes old, it is due on
-the next watch cycle. Before dispatch, the Codex activity check reloads the
-trusted external stop sources. A capacity or remote-compaction stop newer than
-the rollout's last `task_started` record makes that unfinished turn inactive;
-rollout activity newer than the stop still defers the resume.
+A newly queued capacity event becomes due five minutes after the provider log's
+whole-second timestamp. If the timestamp is already more than five minutes old,
+it is due on the next watch cycle. Before dispatch, the Codex activity check
+reloads the trusted external stop sources. A capacity or remote-compaction stop
+newer than the rollout's last `task_started` record makes that unfinished turn
+inactive; rollout activity newer by subsecond ordering still defers the resume.
 
 The resume command remains:
 
@@ -99,7 +112,8 @@ paths:
 - default: `~/.codex/logs_2.sqlite`;
 - CLI: `--codex-logs-db` on discovery, autoqueue, watch, start, and launchd
   commands; and
-- launchd: persist the absolute logs database path in `ProgramArguments`.
+- launchd: expand and resolve the logs path, then persist that absolute path in
+  `ProgramArguments`.
 
 The new option follows the existing `--codex-history-file` plumbing so
 foreground and daemon behavior stay identical.
@@ -124,7 +138,10 @@ Tests create synthetic SQLite databases and rollout records. Coverage includes:
 
 - the exact provider log row queues the matching Codex session;
 - the retry time is five minutes after the event;
-- later rollout activity suppresses an older capacity row;
+- later same-second rollout activity suppresses an older capacity row while
+  earlier same-second activity does not;
+- remote-compaction and capacity events use the same deterministic subsecond
+  ordering model;
 - a newer capacity row re-arms a resolved queue item;
 - a repeated capacity row sets due, earlier, and later pending schedules to the
   exact five-minute mark without resetting attempts or changing `updated_at`;
@@ -133,7 +150,8 @@ Tests create synthetic SQLite databases and rollout records. Coverage includes:
 - missing, locked, malformed, and incompatible databases fail open for the
   daemon while producing no capacity event, including path-preparation
   `OSError` and `RuntimeError` failures;
-- CLI parsing and launchd plists carry `--codex-logs-db`; and
+- CLI parsing and launchd plists carry `--codex-logs-db`, with relative inputs
+  serialized as resolved absolute paths; and
 - the existing model-capacity rollout test continues proving that ordinary
   rollout errors are not misclassified as usage limits.
 

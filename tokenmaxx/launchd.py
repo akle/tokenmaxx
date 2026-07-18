@@ -47,7 +47,9 @@ def build_launchd_plist(
     if codex_history_file is not None:
         arguments.extend(["--codex-history-file", str(Path(codex_history_file).expanduser())])
     if codex_logs_db is not None:
-        arguments.extend(["--codex-logs-db", str(Path(codex_logs_db).expanduser())])
+        arguments.extend(
+            ["--codex-logs-db", str(Path(codex_logs_db).expanduser().resolve())]
+        )
     if projects_dir is not None:
         arguments.extend(["--projects-dir", str(Path(projects_dir).expanduser())])
     if lock_timeout_seconds is not None:

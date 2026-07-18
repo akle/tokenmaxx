@@ -1354,12 +1354,37 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>--codex-history-file</string>", plist)
         self.assertIn("<string>/tmp/codex-history.jsonl</string>", plist)
         self.assertIn("<string>--codex-logs-db</string>", plist)
-        self.assertIn("<string>/tmp/codex-logs.sqlite</string>", plist)
+        self.assertIn(
+            f"<string>{Path('/tmp/codex-logs.sqlite').resolve()}</string>", plist
+        )
         self.assertIn("<string>--projects-dir</string>", plist)
         self.assertIn("<string>/tmp/projects</string>", plist)
         self.assertIn("<string>--lock-timeout-seconds</string>", plist)
         self.assertIn("<string>7</string>", plist)
         self.assertTrue(plistlib.loads(plist.encode())["RunAtLoad"])
+
+    def test_build_launchd_plist_resolves_relative_codex_logs_database(self):
+        original_cwd = Path.cwd()
+        relative_logs_db = Path("state/codex-logs.sqlite")
+        try:
+            os.chdir(self.root)
+            expected_logs_db = relative_logs_db.resolve()
+            plist = launchd.build_launchd_plist(
+                program="/usr/local/bin/tokenmaxx",
+                claude_bin=None,
+                codex_bin="/opt/homebrew/bin/codex",
+                queue_path=Path("/tmp/queue.jsonl"),
+                log_path=Path("/tmp/tokenmaxx.log"),
+                interval_seconds=300,
+                codex_logs_db=relative_logs_db,
+            )
+        finally:
+            os.chdir(original_cwd)
+
+        arguments = plistlib.loads(plist.encode())["ProgramArguments"]
+        logs_path = Path(arguments[arguments.index("--codex-logs-db") + 1])
+        self.assertTrue(logs_path.is_absolute())
+        self.assertEqual(logs_path, expected_logs_db)
 
     def test_build_launchd_plist_embeds_path_environment(self):
         plist = launchd.build_launchd_plist(
@@ -1612,7 +1637,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>--codex-bin</string>", plist)
         self.assertIn("<string>/opt/homebrew/bin/codex</string>", plist)
         self.assertIn("<string>--codex-logs-db</string>", plist)
-        self.assertIn(f"<string>{self.codex_logs_db}</string>", plist)
+        self.assertIn(f"<string>{self.codex_logs_db.resolve()}</string>", plist)
         self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
 
     def test_start_requires_at_least_one_provider_executable(self):

@@ -43,3 +43,24 @@ def record_timestamp(record: dict) -> int:
         except ValueError:
             pass
     return 0
+
+
+def record_timestamp_ns(record: dict) -> int:
+    """Return an ISO record timestamp as epoch nanoseconds for ordering."""
+    raw = record.get("timestamp")
+    if not isinstance(raw, str):
+        return 0
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        whole_seconds = int(parsed.replace(microsecond=0).timestamp())
+    except ValueError:
+        return 0
+
+    fraction_digits = ""
+    if "." in raw:
+        for character in raw.split(".", 1)[1]:
+            if not character.isdigit():
+                break
+            fraction_digits += character
+    fraction_ns = int((fraction_digits + "000000000")[:9]) if fraction_digits else 0
+    return whole_seconds * 1_000_000_000 + fraction_ns

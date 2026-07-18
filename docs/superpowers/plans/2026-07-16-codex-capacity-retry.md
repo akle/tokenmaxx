@@ -8,6 +8,12 @@
 > remain unchanged. Logs-path expansion, resolution, and URI construction must
 > remain inside the loader's guarded failure boundary.
 
+> **Human ruling after final review (2026-07-18):** Preserve capacity
+> `ts_nanos` and rollout fractional ISO timestamps in freshness and
+> external-stop comparisons. Use whole epoch seconds only for queue fields, age
+> checks, and the exact `hit_at + 300` schedule. Resolve the expanded Codex logs
+> path before launchd plist serialization.
+
 **Goal:** Queue an unfinished Codex thread from an exact provider-authored model-capacity log event and retry the same model after five minutes.
 
 **Architecture:** Add a bounded, read-only SQLite event loader to the Codex provider. Merge its thread-scoped events into the existing queue/re-arm path, then plumb the database path through the CLI and launchd exactly like the existing Codex history path.
@@ -21,7 +27,7 @@
 - Retry the same thread and model five minutes after the provider event; never pass a model override.
 - For a qualifying fresh capacity event, replace any different pending retry schedule with exactly `hit_at + 300`, preserving `attempts` and `updated_at`.
 - Never infer model capacity from `history.jsonl`, rollout user/assistant/tool content, or copied error text.
-- Suppress an event when the rollout has newer `task_started` or `task_complete` activity.
+- Suppress an event when the rollout has newer `task_started` or `task_complete` activity, including later activity in the same second; earlier same-second activity does not suppress a later event.
 - Preserve queue deduplication, user-drop tombstones, bounded attempts, global resume locking, and normal active-session deferral.
 - Path-preparation failures and missing, locked, malformed, unreadable, or schema-incompatible databases produce no capacity events and do not stop the daemon.
 - Add no runtime dependency.
@@ -51,7 +57,8 @@
 - Modify: `tokenmaxx/codex.py`
 
 **Interfaces:**
-- Produces: `load_model_capacity_events(logs_path: Path | None, session_ids: set[str], *, now: int, max_session_age_hours: float) -> dict[str, int]`.
+- Produces: `ExternalStopEvent(hit_at: int, ordering_at_ns: int)` for separate whole-second scheduling and subsecond ordering.
+- Produces: `load_model_capacity_events(logs_path: Path | None, session_ids: set[str], *, now: int, max_session_age_hours: float) -> dict[str, ExternalStopEvent]`.
 - Produces: `MODEL_CAPACITY_RETRY_SECONDS = 300`.
 - Produces: `reschedule_pending_capacity_item(...)` without resetting attempts.
 - Extends: `build_limited_queue_items(..., logs_path: Path | None = None)`.
@@ -192,13 +199,22 @@ does not accept it.
 
 - [ ] **Step 4: Implement the exact read-only capacity loader**
 
-Add `import sqlite3` and these constants/functions to `tokenmaxx/codex.py`:
+Add `import sqlite3`, a focused external-event type, and the capacity loader to
+`tokenmaxx/codex.py`. The loader must select and preserve both timestamp
+components:
 
 ```python
 MODEL_CAPACITY_LOG_TARGET = "codex_core::session::turn"
 MODEL_CAPACITY_ERROR = "Selected model is at capacity. Please try a different model."
 MODEL_CAPACITY_LOG_SUFFIX = f"Turn error: {MODEL_CAPACITY_ERROR}"
 MODEL_CAPACITY_RETRY_SECONDS = 5 * 60
+NANOSECONDS_PER_SECOND = 1_000_000_000
+
+
+@dataclass(frozen=True)
+class ExternalStopEvent:
+    hit_at: int
+    ordering_at_ns: int
 
 
 def load_model_capacity_events(
@@ -207,11 +223,11 @@ def load_model_capacity_events(
     *,
     now: int,
     max_session_age_hours: float,
-) -> dict[str, int]:
+) -> dict[str, ExternalStopEvent]:
     if logs_path is None or not session_ids:
         return {}
     oldest = now - int(float(max_session_age_hours) * 60 * 60)
-    events: dict[str, int] = {}
+    events: dict[str, ExternalStopEvent] = {}
     try:
         database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
         connection = sqlite3.connect(database_uri, uri=True, timeout=0)
@@ -219,7 +235,7 @@ def load_model_capacity_events(
             for session_id in session_ids:
                 rows = connection.execute(
                     """
-                    SELECT ts, feedback_log_body
+                    SELECT ts, ts_nanos, feedback_log_body
                     FROM logs
                     WHERE thread_id = ?
                       AND ts BETWEEN ? AND ?
@@ -228,9 +244,16 @@ def load_model_capacity_events(
                     """,
                     (session_id, oldest, now, MODEL_CAPACITY_LOG_TARGET),
                 )
-                for raw_hit_at, body in rows:
+                for raw_hit_at, raw_ts_nanos, body in rows:
                     if isinstance(body, str) and body.endswith(MODEL_CAPACITY_LOG_SUFFIX):
-                        events[session_id] = int(raw_hit_at)
+                        hit_at = int(raw_hit_at)
+                        ts_nanos = int(raw_ts_nanos)
+                        if not 0 <= ts_nanos < NANOSECONDS_PER_SECOND:
+                            raise ValueError("invalid fractional nanosecond component")
+                        events[session_id] = ExternalStopEvent(
+                            hit_at=hit_at,
+                            ordering_at_ns=hit_at * NANOSECONDS_PER_SECOND + ts_nanos,
+                        )
                         break
         finally:
             connection.close()
@@ -239,9 +262,8 @@ def load_model_capacity_events(
     return events
 ```
 
-Extend `build_limited_queue_items()` with `logs_path: Path | None = None`, load
-events once for the discovered IDs, and merge them after the existing rollout
-and remote-compaction candidates:
+Extend `build_limited_queue_items()` with `logs_path: Path | None = None` and
+load events once for the discovered IDs:
 
 ```python
     capacity_events = load_model_capacity_events(
@@ -252,14 +274,27 @@ and remote-compaction candidates:
     )
 ```
 
-Inside the session loop, after `compact_hit_at` handling, add:
+Represent remote-compaction rows with the same `ExternalStopEvent` type and a
+deterministic zero fractional component. Inside the session loop, choose the
+latest unsuppressed external event by `ordering_at_ns`; only the winning
+capacity event installs the five-minute capacity schedule:
 
 ```python
+        compact_event = unsuppressed_external_event(session, compact_events)
+        capacity_event = unsuppressed_external_event(session, capacity_events)
+        external_candidates = [
+            event for event in (compact_event, capacity_event) if event is not None
+        ]
+        external_event = (
+            max(external_candidates, key=lambda event: event.ordering_at_ns)
+            if external_candidates
+            else None
+        )
         capacity_retry_at = None
-        capacity_hit_at = remote_compact_hit_at(session, capacity_events)
-        if capacity_hit_at is not None and (info is None or capacity_hit_at > info[0]):
-            info = (capacity_hit_at, None)
-            capacity_retry_at = capacity_hit_at + MODEL_CAPACITY_RETRY_SECONDS
+        if external_event is not None and (info is None or external_event.hit_at > info[0]):
+            info = (external_event.hit_at, None)
+            if external_event is capacity_event:
+                capacity_retry_at = external_event.hit_at + MODEL_CAPACITY_RETRY_SECONDS
 ```
 
 After `apply_limit_event()`, schedule capacity directly instead of using the
@@ -278,17 +313,20 @@ This explicit branch is required: the existing usage-reset path adds
 `RESET_BUFFER_SECONDS`, which would turn a five-minute capacity retry into six
 minutes.
 
-Add a provider-owned external-stop helper and extend the activity functions:
+Add a provider-owned external-stop helper and extend the activity functions.
+`session_has_newer_task_activity()` compares exact rollout ISO epoch
+nanoseconds against `event.ordering_at_ns`, while scheduling callers consume
+only `event.hit_at`:
 
 ```python
-def latest_external_stop_at(
+def latest_external_stop(
     session: dict,
     *,
     history_path: Path | None,
     logs_path: Path | None,
     now: int,
     max_session_age_hours: float,
-) -> int | None:
+) -> ExternalStopEvent | None:
     session_id = str(session.get("sessionId") or "")
     compact_events = load_remote_compact_events(
         history_path,
@@ -302,29 +340,29 @@ def latest_external_stop_at(
         max_session_age_hours=max_session_age_hours,
     )
     candidates = [
-        hit_at
-        for hit_at in (
-            remote_compact_hit_at(session, compact_events),
-            remote_compact_hit_at(session, capacity_events),
+        event
+        for event in (
+            unsuppressed_external_event(session, compact_events),
+            unsuppressed_external_event(session, capacity_events),
         )
-        if hit_at is not None
+        if event is not None
     ]
-    return max(candidates) if candidates else None
+    return max(candidates, key=lambda event: event.ordering_at_ns) if candidates else None
 ```
 
-Extend `session_is_active()` with `external_stop_at: int | None = None` and add
+Extend `session_is_active()` with `external_stop: ExternalStopEvent | None = None` and add
 this check before reading the latest task state:
 
 ```python
-    if external_stop_at is not None and not session_has_newer_task_activity(
-        session, external_stop_at
+    if external_stop is not None and not session_has_newer_task_activity(
+        session, external_stop
     ):
         return False
 ```
 
 Extend `find_active_session()` with keyword-only `history_path`, `logs_path`,
 and `max_session_age_hours` defaults. For the matching session, calculate
-`external_stop_at = latest_external_stop_at(...)` and pass it into
+`external_stop = latest_external_stop(...)` and pass it into
 `session_is_active()`.
 
 - [ ] **Step 5: Run the focused tests and verify GREEN**
@@ -715,7 +753,9 @@ Append its daemon argument after `--codex-history-file`:
 
 ```python
     if codex_logs_db is not None:
-        arguments.extend(["--codex-logs-db", str(Path(codex_logs_db).expanduser())])
+        arguments.extend(
+            ["--codex-logs-db", str(Path(codex_logs_db).expanduser().resolve())]
+        )
 ```
 
 Pass `codex_logs_db=args.codex_logs_db` from both `cmd_launchd_install()` and
@@ -829,9 +869,11 @@ In `docs/ARCHITECTURE.md`, extend discovery step 1 with read-only
    read-only Codex logs database and accepts only
    `target == "codex_core::session::turn"` rows ending with the exact provider
    `Turn error: Selected model is at capacity. Please try a different model.`
-   suffix. Newer rollout task activity suppresses both history and capacity
-   events. A capacity row is due five minutes after its timestamp and resumes
-   the same model.
+   suffix. Freshness comparisons preserve SQLite `ts_nanos` and rollout
+   fractional ISO timestamps; second-only history events use a deterministic
+   zero fractional component. Later same-second rollout task activity
+   suppresses both history and capacity events. A capacity row is due five
+   minutes after its whole-second timestamp and resumes the same model.
 ```
 
 In `docs/SECURITY.md`, replace the capacity exclusion at the end of Detection
@@ -911,8 +953,8 @@ Expected:
   `/Users/pep/.codex/logs_2.sqlite`;
 - launchd state is running with a 300-second interval;
 - the immediate scan/watch cycle completes without traceback;
-- an eligible exact capacity event is queued or stale/recovered capacity events
-  are suppressed by newer rollout activity; and
+- a 72-hour read-only live scan against a temporary queue excludes the known
+  completed capacity thread IDs through newer rollout activity suppression; and
 - queue status remains inspectable with no duplicate provider/session rows.
 
 - [ ] **Step 10: Push the verified branch**

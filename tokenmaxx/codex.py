@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import CODEX_PROMPT
 from .queue import RESET_BUFFER_SECONDS, QueueItem, apply_limit_event
 from .runner import run_due_command
-from .transcript import record_timestamp, tail_records
+from .transcript import record_timestamp, record_timestamp_ns, tail_records
 
 
 ACTIVE_STALENESS_SECONDS = 24 * 60 * 60
@@ -23,6 +24,13 @@ MODEL_CAPACITY_LOG_TARGET = "codex_core::session::turn"
 MODEL_CAPACITY_ERROR = "Selected model is at capacity. Please try a different model."
 MODEL_CAPACITY_LOG_SUFFIX = f"Turn error: {MODEL_CAPACITY_ERROR}"
 MODEL_CAPACITY_RETRY_SECONDS = 5 * 60
+NANOSECONDS_PER_SECOND = 1_000_000_000
+
+
+@dataclass(frozen=True)
+class ExternalStopEvent:
+    hit_at: int
+    ordering_at_ns: int
 
 
 def is_usage_limit_error(payload: dict) -> bool:
@@ -57,7 +65,7 @@ def load_remote_compact_events(
     *,
     now: int,
     max_session_age_hours: float,
-) -> dict[str, int]:
+) -> dict[str, ExternalStopEvent]:
     """Return recent Codex remote-compaction failures keyed by session ID.
 
     Codex persists this particular failure in `~/.codex/history.jsonl`, not in
@@ -67,7 +75,7 @@ def load_remote_compact_events(
     if history_path is None:
         return {}
     max_age_seconds = float(max_session_age_hours) * 60 * 60
-    events: dict[str, int] = {}
+    events: dict[str, ExternalStopEvent] = {}
     for record in tail_records(Path(history_path), max_lines=HISTORY_SCAN_MAX_LINES):
         session_id = record.get("session_id")
         hit_at = history_record_timestamp(record)
@@ -80,7 +88,13 @@ def load_remote_compact_events(
             or not is_remote_compact_disconnect(record.get("text"))
         ):
             continue
-        events[session_id] = max(hit_at, events.get(session_id, 0))
+        event = ExternalStopEvent(
+            hit_at=hit_at,
+            ordering_at_ns=hit_at * NANOSECONDS_PER_SECOND,
+        )
+        previous = events.get(session_id)
+        if previous is None or event.ordering_at_ns > previous.ordering_at_ns:
+            events[session_id] = event
     return events
 
 
@@ -90,11 +104,11 @@ def load_model_capacity_events(
     *,
     now: int,
     max_session_age_hours: float,
-) -> dict[str, int]:
+) -> dict[str, ExternalStopEvent]:
     if logs_path is None or not session_ids:
         return {}
     oldest = now - int(float(max_session_age_hours) * 60 * 60)
-    events: dict[str, int] = {}
+    events: dict[str, ExternalStopEvent] = {}
     try:
         database_uri = Path(logs_path).expanduser().resolve().as_uri() + "?mode=ro"
         connection = sqlite3.connect(database_uri, uri=True, timeout=0)
@@ -102,7 +116,7 @@ def load_model_capacity_events(
             for session_id in session_ids:
                 rows = connection.execute(
                     """
-                    SELECT ts, feedback_log_body
+                    SELECT ts, ts_nanos, feedback_log_body
                     FROM logs
                     WHERE thread_id = ?
                       AND ts BETWEEN ? AND ?
@@ -111,9 +125,16 @@ def load_model_capacity_events(
                     """,
                     (session_id, oldest, now, MODEL_CAPACITY_LOG_TARGET),
                 )
-                for raw_hit_at, body in rows:
+                for raw_hit_at, raw_ts_nanos, body in rows:
                     if isinstance(body, str) and body.endswith(MODEL_CAPACITY_LOG_SUFFIX):
-                        events[session_id] = int(raw_hit_at)
+                        hit_at = int(raw_hit_at)
+                        ts_nanos = int(raw_ts_nanos)
+                        if not 0 <= ts_nanos < NANOSECONDS_PER_SECOND:
+                            raise ValueError("invalid fractional nanosecond component")
+                        events[session_id] = ExternalStopEvent(
+                            hit_at=hit_at,
+                            ordering_at_ns=hit_at * NANOSECONDS_PER_SECOND + ts_nanos,
+                        )
                         break
         finally:
             connection.close()
@@ -254,7 +275,7 @@ def session_limit_retry_at(session: dict) -> int | None:
     return info[1] if info is not None else None
 
 
-def session_has_newer_task_activity(session: dict, event_at: int) -> bool:
+def session_has_newer_task_activity(session: dict, event: ExternalStopEvent) -> bool:
     path = session.get("_path")
     if not path:
         return False
@@ -264,17 +285,20 @@ def session_has_newer_task_activity(session: dict, event_at: int) -> bool:
         payload = record.get("payload")
         if not isinstance(payload, dict) or payload.get("type") not in {"task_started", "task_complete"}:
             continue
-        if record_timestamp(record) > event_at:
+        if record_timestamp_ns(record) > event.ordering_at_ns:
             return True
     return False
 
 
-def remote_compact_hit_at(session: dict, events: dict[str, int]) -> int | None:
+def unsuppressed_external_event(
+    session: dict,
+    events: dict[str, ExternalStopEvent],
+) -> ExternalStopEvent | None:
     session_id = str(session.get("sessionId") or "")
-    hit_at = events.get(session_id)
-    if hit_at is None or session_has_newer_task_activity(session, hit_at):
+    event = events.get(session_id)
+    if event is None or session_has_newer_task_activity(session, event):
         return None
-    return hit_at
+    return event
 
 
 def reschedule_pending_capacity_item(
@@ -326,14 +350,21 @@ def build_limited_queue_items(
         if updated_at <= 0 or now - updated_at > max_age_seconds:
             continue
         info = session_limit_info(session)
-        compact_hit_at = remote_compact_hit_at(session, compact_events)
-        if compact_hit_at is not None and (info is None or compact_hit_at > info[0]):
-            info = (compact_hit_at, None)
+        compact_event = unsuppressed_external_event(session, compact_events)
+        capacity_event = unsuppressed_external_event(session, capacity_events)
+        external_candidates = [
+            event for event in (compact_event, capacity_event) if event is not None
+        ]
+        external_event = (
+            max(external_candidates, key=lambda event: event.ordering_at_ns)
+            if external_candidates
+            else None
+        )
         capacity_retry_at = None
-        capacity_hit_at = remote_compact_hit_at(session, capacity_events)
-        if capacity_hit_at is not None and (info is None or capacity_hit_at > info[0]):
-            info = (capacity_hit_at, None)
-            capacity_retry_at = capacity_hit_at + MODEL_CAPACITY_RETRY_SECONDS
+        if external_event is not None and (info is None or external_event.hit_at > info[0]):
+            info = (external_event.hit_at, None)
+            if external_event is capacity_event:
+                capacity_retry_at = external_event.hit_at + MODEL_CAPACITY_RETRY_SECONDS
         if info is None:
             continue
         hit_at, retry_at = info
@@ -361,14 +392,14 @@ def build_limited_queue_items(
     return affected
 
 
-def latest_external_stop_at(
+def latest_external_stop(
     session: dict,
     *,
     history_path: Path | None,
     logs_path: Path | None,
     now: int,
     max_session_age_hours: float,
-) -> int | None:
+) -> ExternalStopEvent | None:
     session_id = str(session.get("sessionId") or "")
     compact_events = load_remote_compact_events(
         history_path,
@@ -382,21 +413,21 @@ def latest_external_stop_at(
         max_session_age_hours=max_session_age_hours,
     )
     candidates = [
-        hit_at
-        for hit_at in (
-            remote_compact_hit_at(session, compact_events),
-            remote_compact_hit_at(session, capacity_events),
+        event
+        for event in (
+            unsuppressed_external_event(session, compact_events),
+            unsuppressed_external_event(session, capacity_events),
         )
-        if hit_at is not None
+        if event is not None
     ]
-    return max(candidates) if candidates else None
+    return max(candidates, key=lambda event: event.ordering_at_ns) if candidates else None
 
 
 def session_is_active(
     session: dict,
     now: int,
     grace_seconds: int,
-    external_stop_at: int | None = None,
+    external_stop: ExternalStopEvent | None = None,
 ) -> bool:
     path = session.get("_path")
     if not path:
@@ -407,8 +438,8 @@ def session_is_active(
     records = tail_records(rollout_path)
     if not rollout_path.is_file():
         return False
-    if external_stop_at is not None and not session_has_newer_task_activity(
-        session, external_stop_at
+    if external_stop is not None and not session_has_newer_task_activity(
+        session, external_stop
     ):
         return False
     for record in reversed(records):
@@ -444,14 +475,14 @@ def find_active_session(
     for session in sessions:
         if str(session.get("sessionId")) != session_id:
             continue
-        external_stop_at = latest_external_stop_at(
+        external_stop = latest_external_stop(
             session,
             history_path=history_path,
             logs_path=logs_path,
             now=now,
             max_session_age_hours=max_session_age_hours,
         )
-        if session_is_active(session, now, grace_seconds, external_stop_at):
+        if session_is_active(session, now, grace_seconds, external_stop):
             return session
     return None
 

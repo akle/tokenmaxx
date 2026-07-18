@@ -324,6 +324,179 @@ class CodexTests(unittest.TestCase):
 
         self.assertIsNone(active)
 
+    def test_model_capacity_loader_preserves_subsecond_ordering_time(self):
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    889_999_000,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+
+        capacity_event = codex.load_model_capacity_events(
+            logs,
+            {"codex-1"},
+            now=1000,
+            max_session_age_hours=1,
+        )["codex-1"]
+
+        self.assertEqual(capacity_event.hit_at, 980)
+        self.assertEqual(capacity_event.ordering_at_ns, 980_889_999_000)
+
+    def test_same_second_task_complete_after_capacity_suppresses_queue_discovery(self):
+        self.write_rollout(
+            records=(
+                event("task_started", "1970-01-01T00:16:20.800Z"),
+                event("task_complete", "1970-01-01T00:16:20.891Z"),
+            )
+        )
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    889_999_000,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            logs_path=logs,
+        )
+
+        self.assertEqual(items, [])
+
+    def test_same_second_task_started_after_capacity_keeps_session_active(self):
+        self.write_rollout(records=(event("task_started", "1970-01-01T00:16:20.891Z"),))
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    889_999_000,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+
+        active = codex.find_active_session(
+            sessions,
+            "codex-1",
+            1000,
+            30,
+            logs_path=logs,
+            max_session_age_hours=1,
+        )
+
+        self.assertEqual(active["sessionId"], "codex-1")
+
+    def test_same_second_task_started_before_capacity_still_queues(self):
+        self.write_rollout(records=(event("task_started", "1970-01-01T00:16:20.888Z"),))
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    889_999_000,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        affected = codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            logs_path=logs,
+        )
+
+        self.assertEqual(affected, items)
+        self.assertEqual(items[0].next_attempt_at, 1280)
+
+    def test_same_second_task_started_before_capacity_makes_session_inactive(self):
+        self.write_rollout(records=(event("task_started", "1970-01-01T00:16:20.888Z"),))
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    889_999_000,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+
+        active = codex.find_active_session(
+            sessions,
+            "codex-1",
+            1000,
+            30,
+            logs_path=logs,
+            max_session_age_hours=1,
+        )
+
+        self.assertIsNone(active)
+
+    def test_same_second_capacity_orders_after_second_only_remote_compaction(self):
+        self.write_rollout()
+        history = self.write_history(
+            [
+                {
+                    "session_id": "codex-1",
+                    "ts": 980,
+                    "text": (
+                        "\u25a0 stream disconnected before completion: error sending request for url "
+                        "(https://chatgpt.com/backend-api/codex/responses)"
+                    ),
+                }
+            ]
+        )
+        logs = self.write_logs_db(
+            [
+                (
+                    980,
+                    889_999_000,
+                    "codex_core::session::turn",
+                    "codex-1",
+                    codex.MODEL_CAPACITY_LOG_SUFFIX,
+                )
+            ]
+        )
+        sessions = codex.load_codex_sessions(self.root, now=1000, max_session_age_hours=1)
+        items = []
+
+        affected = codex.build_limited_queue_items(
+            sessions,
+            items,
+            now=1000,
+            max_session_age_hours=1,
+            history_path=history,
+            logs_path=logs,
+        )
+
+        self.assertEqual(affected, items)
+        self.assertEqual(items[0].next_attempt_at, 1280)
+
     def test_model_capacity_loader_ignores_untrusted_stale_and_partial_rows(self):
         logs = self.write_logs_db(
             [
