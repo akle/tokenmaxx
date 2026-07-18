@@ -72,10 +72,16 @@ packaging, queue behavior, or the daemon model changes.
   regular messages, tool output, and file contents routinely *mention* limit
   phrases without the session being limited. When Claude ships a new limit
   banner wording, add it to `LIMIT_MARKERS` with a test using the exact text.
-- Codex auto-queue accepts only a terminal provider-authored `event_msg` error
-  with `codex_error_info == "usage_limit_exceeded"`, or the exact
-  provider-authored usage-limit prefix when the code is absent. Generic errors
-  and ordinary user, assistant, tool, or file text never queue a session.
+- Codex auto-queue trusts only terminal provider-authored usage-limit errors
+  and exhausted rate-limit telemetry with a future reset from rollout
+  `event_msg` records; known remote-compaction disconnect records from the
+  bounded Codex history tail; and thread-scoped rows from the read-only Codex
+  logs database with `target == "codex_core::session::turn"` and bodies ending
+  exactly
+  `Turn error: Selected model is at capacity. Please try a different model.`
+  Newer rollout task activity suppresses history and capacity events.
+  Generic failures and matching text in user, assistant, tool, history, or file
+  content remain untrusted for model-capacity inference.
 - Existing `done`/`blocked` rows re-arm only on a limit banner NEWER than the
   row's `updatedAt`; rows with `blocked_reason` "dropped by user" never re-arm.
 - `watch` must never resume an active provider session; it uses Claude process
