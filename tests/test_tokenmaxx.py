@@ -55,6 +55,7 @@ class TokenmaxxTests(unittest.TestCase):
         self.sessions_dir = self.root / "sessions"
         self.codex_sessions_dir = self.root / "codex-sessions"
         self.codex_history_file = self.root / "codex-history.jsonl"
+        self.codex_logs_db = self.root / "codex-logs.sqlite"
         self.projects_dir = self.root / "projects"
         self.sessions_dir.mkdir()
         self.codex_sessions_dir.mkdir()
@@ -69,6 +70,7 @@ class TokenmaxxTests(unittest.TestCase):
             "sessions_dir": self.sessions_dir,
             "codex_sessions_dir": self.codex_sessions_dir,
             "codex_history_file": self.codex_history_file,
+            "codex_logs_db": self.codex_logs_db,
             "projects_dir": self.projects_dir,
             "pid": None,
             "session_id": None,
@@ -558,6 +560,29 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("Auto-queued 1 session", output.getvalue())
         self.assertEqual([item.session_id for item in load_queue(self.queue_path)], ["already", "limited"])
 
+    def test_autoqueue_passes_codex_logs_database_to_provider(self):
+        with patch("tokenmaxx.cli.codex.build_limited_queue_items", return_value=[]) as build:
+            cli.autoqueue_limited_sessions(
+                self.args(),
+                [],
+                1000,
+                [],
+                provider="codex",
+            )
+
+        self.assertEqual(build.call_args.kwargs["logs_path"], self.codex_logs_db)
+
+    def test_active_codex_check_passes_external_stop_sources(self):
+        self.write_codex_session("codex-1")
+        item = QueueItem(cwd="/tmp/codex", session_id="codex-1", provider="codex")
+
+        with patch("tokenmaxx.cli.codex.find_active_session", return_value=None) as find:
+            cli.find_active_provider_session(self.args(), item, 1000)
+
+        self.assertEqual(find.call_args.kwargs["history_path"], self.codex_history_file)
+        self.assertEqual(find.call_args.kwargs["logs_path"], self.codex_logs_db)
+        self.assertEqual(find.call_args.kwargs["max_session_age_hours"], 24)
+
     def test_autoqueue_adds_limited_sessions_from_both_providers(self):
         self.write_session(
             "claude.json",
@@ -975,11 +1000,20 @@ class TokenmaxxTests(unittest.TestCase):
                 str(self.codex_sessions_dir),
             ]
         )
-        watch_args = parser.parse_args(["watch", "--codex-bin", "/usr/local/bin/codex"])
+        watch_args = parser.parse_args(
+            [
+                "watch",
+                "--codex-bin",
+                "/usr/local/bin/codex",
+                "--codex-logs-db",
+                str(self.codex_logs_db),
+            ]
+        )
         drop_args = parser.parse_args(["drop", "--provider", "codex", "--session-id", "abc"])
         self.assertEqual(add_args.provider, "codex")
         self.assertEqual(add_args.codex_sessions_dir, self.codex_sessions_dir)
         self.assertEqual(watch_args.codex_bin, "/usr/local/bin/codex")
+        self.assertEqual(watch_args.codex_logs_db, self.codex_logs_db)
         self.assertEqual(drop_args.provider, "codex")
 
     def test_package_version_is_patch_release(self):
@@ -1301,6 +1335,7 @@ class TokenmaxxTests(unittest.TestCase):
             sessions_dir=Path("/tmp/sessions"),
             codex_sessions_dir=Path("/tmp/codex-sessions"),
             codex_history_file=Path("/tmp/codex-history.jsonl"),
+            codex_logs_db=Path("/tmp/codex-logs.sqlite"),
             projects_dir=Path("/tmp/projects"),
             lock_timeout_seconds=7,
         )
@@ -1318,6 +1353,8 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertIn("<string>/tmp/codex-sessions</string>", plist)
         self.assertIn("<string>--codex-history-file</string>", plist)
         self.assertIn("<string>/tmp/codex-history.jsonl</string>", plist)
+        self.assertIn("<string>--codex-logs-db</string>", plist)
+        self.assertIn("<string>/tmp/codex-logs.sqlite</string>", plist)
         self.assertIn("<string>--projects-dir</string>", plist)
         self.assertIn("<string>/tmp/projects</string>", plist)
         self.assertIn("<string>--lock-timeout-seconds</string>", plist)
@@ -1574,6 +1611,8 @@ class TokenmaxxTests(unittest.TestCase):
         self.assertNotIn("<string>--claude-bin</string>", plist)
         self.assertIn("<string>--codex-bin</string>", plist)
         self.assertIn("<string>/opt/homebrew/bin/codex</string>", plist)
+        self.assertIn("<string>--codex-logs-db</string>", plist)
+        self.assertIn(f"<string>{self.codex_logs_db}</string>", plist)
         self.assertIn(["launchctl", "load", str(args.plist_path)], calls)
 
     def test_start_requires_at_least_one_provider_executable(self):

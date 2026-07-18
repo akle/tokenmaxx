@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_RETRY_DELAY_SECONDS,
     DEFAULT_RESUME_TIMEOUT_SECONDS,
     default_codex_history_file,
+    default_codex_logs_db,
     default_codex_sessions_dir,
     default_log_path,
     default_plist_path,
@@ -272,6 +273,7 @@ def autoqueue_limited_sessions(
             now=now,
             max_session_age_hours=args.max_session_age_hours,
             history_path=getattr(args, "codex_history_file", None),
+            logs_path=getattr(args, "codex_logs_db", None),
         )
     raise ValueError(f"unsupported provider: {provider}")
 
@@ -390,7 +392,15 @@ def find_active_provider_session(args, item: QueueItem, now: int) -> dict | None
     if item.provider == "claude":
         return claude.find_active_session(sessions, item.session_id, now, DEFAULT_ACTIVE_GRACE_SECONDS)
     if item.provider == "codex":
-        return codex.find_active_session(sessions, item.session_id, now, DEFAULT_ACTIVE_GRACE_SECONDS)
+        return codex.find_active_session(
+            sessions,
+            item.session_id,
+            now,
+            DEFAULT_ACTIVE_GRACE_SECONDS,
+            history_path=getattr(args, "codex_history_file", None),
+            logs_path=getattr(args, "codex_logs_db", None),
+            max_session_age_hours=args.max_session_age_hours,
+        )
     raise ValueError(f"unsupported provider: {item.provider}")
 
 
@@ -552,6 +562,7 @@ def cmd_launchd_install(args) -> int:
         sessions_dir=args.sessions_dir,
         codex_sessions_dir=args.codex_sessions_dir,
         codex_history_file=args.codex_history_file,
+        codex_logs_db=args.codex_logs_db,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
         path_env=os.environ.get("PATH"),
@@ -609,6 +620,7 @@ def cmd_start(args) -> int:
         sessions_dir=args.sessions_dir,
         codex_sessions_dir=args.codex_sessions_dir,
         codex_history_file=args.codex_history_file,
+        codex_logs_db=args.codex_logs_db,
         projects_dir=args.projects_dir,
         lock_timeout_seconds=args.lock_timeout_seconds,
         path_env=os.environ.get("PATH"),
@@ -690,6 +702,7 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sessions-dir", type=Path, default=default_sessions_dir())
     parser.add_argument("--codex-sessions-dir", type=Path, default=default_codex_sessions_dir())
     parser.add_argument("--codex-history-file", type=Path, default=default_codex_history_file())
+    parser.add_argument("--codex-logs-db", type=Path, default=default_codex_logs_db())
     parser.add_argument("--projects-dir", type=Path, default=default_projects_dir())
     parser.add_argument("--lock-timeout-seconds", type=int, default=10)
 

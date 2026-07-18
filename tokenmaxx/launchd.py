@@ -30,6 +30,7 @@ def build_launchd_plist(
     lock_timeout_seconds: int | None = None,
     path_env: str | None = None,
     codex_history_file: Path | None = None,
+    codex_logs_db: Path | None = None,
 ) -> str:
     arguments = [program, "watch"]
     if claude_bin:
@@ -45,6 +46,8 @@ def build_launchd_plist(
         arguments.extend(["--codex-sessions-dir", str(Path(codex_sessions_dir).expanduser())])
     if codex_history_file is not None:
         arguments.extend(["--codex-history-file", str(Path(codex_history_file).expanduser())])
+    if codex_logs_db is not None:
+        arguments.extend(["--codex-logs-db", str(Path(codex_logs_db).expanduser())])
     if projects_dir is not None:
         arguments.extend(["--projects-dir", str(Path(projects_dir).expanduser())])
     if lock_timeout_seconds is not None:

@@ -49,6 +49,10 @@ def default_codex_history_file() -> Path:
     return Path.home() / ".codex" / "history.jsonl"
 
 
+def default_codex_logs_db() -> Path:
+    return Path.home() / ".codex" / "logs_2.sqlite"
+
+
 def default_projects_dir() -> Path:
     return Path.home() / ".claude" / "projects"
 
