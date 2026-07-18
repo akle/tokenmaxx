@@ -718,14 +718,16 @@ Extend
 
 ```python
         self.assertIn("<string>--codex-logs-db</string>", plist)
-        self.assertIn("<string>/tmp/codex-logs.sqlite</string>", plist)
+        self.assertIn(
+            f"<string>{Path('/tmp/codex-logs.sqlite').resolve()}</string>", plist
+        )
 ```
 
 Extend `test_start_writes_plist_when_only_codex_resolves`:
 
 ```python
         self.assertIn("<string>--codex-logs-db</string>", plist)
-        self.assertIn(f"<string>{self.codex_logs_db}</string>", plist)
+        self.assertIn(f"<string>{self.codex_logs_db.resolve()}</string>", plist)
 ```
 
 - [ ] **Step 6: Run the three tests and verify RED**
